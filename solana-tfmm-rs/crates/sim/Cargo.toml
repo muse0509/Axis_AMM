@@ -1,0 +1,11 @@
+[package]
+name = "tfmm-sim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+ndarray.workspace = true
+tfmm-core = { path = "../core" }

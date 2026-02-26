@@ -1,0 +1,6 @@
+/target
+.env
+results/
+data/
+plots/
+.DS_Store

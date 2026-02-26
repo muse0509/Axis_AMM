@@ -1,0 +1,24 @@
+[package]
+name = "tfmm-ingest"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dotenv.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+# REST最小版では blocking client を使う
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"], default-features = false }
+
+# 後続フェーズで使う予定（今は未使用でもOK）
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+solana-client.workspace = true
+solana-sdk.workspace = true
+
+tfmm-core = { path = "../core" }

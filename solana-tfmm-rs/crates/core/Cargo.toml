@@ -1,0 +1,10 @@
+[package]
+name = "tfmm-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+ndarray.workspace = true
