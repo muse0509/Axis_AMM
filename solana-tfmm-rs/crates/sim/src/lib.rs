@@ -97,6 +97,10 @@ pub struct SimulationConfig {
     /// arb後にどの程度 drift を残すか（0=完全修正, 0.5=半分残す）
     pub post_trade_residual_ratio: f64,
 
+    // ▼ Uniswap論文の構造的モデル用パラメータ ▼
+    pub swap_fee_bps: f64,      // f: 全体スワップ手数料
+    pub protocol_fee_bps: f64,  // s: プロトコル手数料
+
     // arbitrage policy
     pub threshold_mode: ThresholdMode,
     pub cost_mode: CostMode,
@@ -115,6 +119,9 @@ impl Default for SimulationConfig {
             seed: 42,
             weight_shift_push_per_slot: 0.00012,
             post_trade_residual_ratio: 0.50,
+            // Uniswap論文 Table 1 の標準的な設定
+            swap_fee_bps: 5.0,      // 例: 5 bps
+            protocol_fee_bps: 1.25, // 例: 1.25 bps
             threshold_mode: ThresholdMode::FixedBps(2.5),
             cost_mode: CostMode::FixedUsd(0.10),
             auction_mode: AuctionMode::Vanilla,
@@ -272,101 +279,111 @@ pub fn run_simulation(
 
     let mut total_gross = 0.0;
     let mut total_net = 0.0;
-    let mut sum_edge_bps_when_arb = 0.0;
-    let mut sum_threshold_bps_used = 0.0;
-    let mut sum_cost_usd_used = 0.0;
+    let sum_edge_bps_when_arb = 0.0;
+    let sum_threshold_bps_used = 0.0;
+    let sum_cost_usd_used = 0.0;
 
     let mut revenue = RevenueBreakdown::default();
 
-    let mut window_state = WindowState::default();
-
-    let mut ideal_portfolio_value = config.tvl_usd;
     let initial_tvl = config.tvl_usd;
 
-    let mut initial_ext_price = 1.0_f64;
+    let initial_ext_price = 1.0_f64;
 
     for slot in 0..config.slots {
-        update_window_state(slot, config, &mut window_state);
+        let _ext_price_prev = ext_price;
 
-        // 1) 外部価格更新（簡易GBM近似）
+        // 1) 外部価格更新（幾何ブラウン運動）
         let ret = sample_log_return_per_slot(config, &mut rng);
         ext_price *= ret.exp();
 
-        // ★ 修正1: 理想ポートフォリオとHODLの価値を「厳密な数式（G3Mの不変量）」で計算
         let ideal_portfolio_value = initial_tvl * (ext_price / initial_ext_price).sqrt();
         let hodl_value = initial_tvl * 0.5 * (ext_price / initial_ext_price) + initial_tvl * 0.5;
-
-        // 2) TFMMのtarget shiftによる pool implied price押し出し（簡易）
         let pool_price_pre = pool_price * (config.weight_shift_push_per_slot).exp();
+        let z_bps = (ext_price.ln() - pool_price_pre.ln()).abs() * 10_000.0;
 
-        // 3) edge / drift 計算
-        let drift_pre_abs = relative_diff(pool_price_pre, ext_price);
-        let edge_bps = drift_pre_abs * 10_000.0;
+        let f = config.swap_fee_bps;
+        let s = config.protocol_fee_bps;
+        let winner_cost = f - s; 
 
-        // 4) 発火閾値 / コスト
-        let base_threshold_bps = sample_threshold_bps(&config.threshold_mode, &mut rng);
-        let base_cost_usd = sample_cost_usd(&config.cost_mode, &mut rng);
-
-        let (threshold_bps_used, cost_usd_used, winner_active) =
-            effective_arb_terms(base_threshold_bps, base_cost_usd, config, &window_state);
-
-        // ★ 修正2: 抜け落ちていた「バッチ末尾でのみ清算を許可する」制約
-        let is_batch_clearing_slot = match &config.auction_mode {
-            AuctionMode::Vanilla => true, // Vanillaはいつでも清算可能
-            AuctionMode::PfdaWindowed(p) => slot % p.window_slots.max(1) == p.window_slots.max(1) - 1, // PFDAはウィンドウ末尾のみ
-        };
-
-        // 5) 裁定発火判定（エッジが閾値を超え、かつ清算可能なスロットであること）
-        let arb_fired = (edge_bps >= threshold_bps_used) && is_batch_clearing_slot;
-
-        let mut current_arb_gap = 0;
-        let mut pool_price_post = pool_price_pre;
-        let mut gross_extraction_usd = 0.0;
-        let mut net_extraction_usd = 0.0;
+        let mut arb_fired = false;
         let mut protocol_revenue_usd = 0.0;
         let mut validator_searcher_revenue_usd = 0.0;
-        let mut lp_loss_proxy_usd = 0.0;
+        let mut pool_price_post = pool_price_pre;
+        let mut current_arb_gap = 0;
+
+        // ---------------------------------------------------------
+        // 2) Axis PFDA-TFMM モデル (バッチスパム抑制効果の統合)
+        // ---------------------------------------------------------
+        match &config.auction_mode {
+            AuctionMode::Vanilla => {
+                // Vanillaは 乖離 f を超えると毎スロット殴り合いが発生
+                if z_bps > f {
+                    arb_fired = true;
+                    // LVR損失
+                    let arb_profit = 0.5 * config.tvl_usd * f64::powi((z_bps - f) / 10_000.0, 2);
+                    
+                    // 【Solanaの現実】
+                    // Vanillaでは、この利益のほぼ100%が Jito Tip やスパム手数料としてバリデータに流出する
+                    validator_searcher_revenue_usd += arb_profit; 
+                    protocol_revenue_usd += config.tvl_usd * ((z_bps - f) / 10_000.0) * (s / 10_000.0);
+                    
+                    let direction = if ext_price > pool_price_pre { 1.0 } else { -1.0 };
+                    pool_price_post = ext_price * f64::exp(-direction * (f / 10_000.0));
+                }
+            }
+            AuctionMode::PfdaWindowed(p) => {
+                // AxisのPFDAバッチ:
+                // バッチ期間中（10スロット）の間に発生するはずだった細かいスパムを、
+                // 勝者が1回の清算でまとめて刈り取り、その利益をプロトコル（入札）へ還元する。
+                // Uniswapの手数料割引(s)の恩恵も同時に受ける。
+                
+                let ws = p.window_slots.max(1);
+                let is_batch_clearing_slot = slot % ws == ws - 1;
+
+                if is_batch_clearing_slot && z_bps > winner_cost {
+                    arb_fired = true;
+                    
+                    // バッチ終了時の大きな乖離から得られるLVR利益
+                    let total_lvr_profit = 0.5 * config.tvl_usd * f64::powi((z_bps - winner_cost) / 10_000.0, 2);
+
+                    // 【AxisのO(1)バッチの真の価値】
+                    // バッチオークションによってレイテンシ競争(スパム)が排除されるため、
+                    // バリデータに流出していた利益が、勝者のBidを通じてプロトコル(LP)に内部化される。
+                    // 競争度(alpha)に応じてプロトコル収益へ。
+                    let alpha = p.auction_competitiveness_alpha.clamp(0.0, 1.0);
+                    protocol_revenue_usd += total_lvr_profit * alpha;
+                    validator_searcher_revenue_usd += total_lvr_profit * (1.0 - alpha);
+
+                    let direction = if ext_price > pool_price_pre { 1.0 } else { -1.0 };
+                    pool_price_post = ext_price * f64::exp(-direction * (winner_cost / 10_000.0));
+                }
+            }
+        }
+
+        // ---------------------------------------------------------
+        // 3) LP損失の算出（Protocol RevenueはLPの利益として相殺する）
+        // ---------------------------------------------------------
+        // LPの真の損失 = (バリデータに抜かれた額) - (プロトコルが稼いだ額)
+        let lp_loss_proxy_usd = validator_searcher_revenue_usd - protocol_revenue_usd;
+        let mut current_arb_gap = 0;
 
         if arb_fired {
             arb_count += 1;
-
             if let Some(prev) = last_arb_slot {
-                let current_gap = slot - prev;
-                gaps.push(current_gap);
-                current_arb_gap = current_gap;
+                current_arb_gap = slot - prev;
+                gaps.push(current_arb_gap);
             }
             last_arb_slot = Some(slot);
 
-            // 6) 裁定後の pool price (部分修正)
-            let log_pool_pre = pool_price_pre.ln();
-            let log_ext = ext_price.ln();
-            let residual = config.post_trade_residual_ratio.clamp(0.0, 1.0);
-            let log_pool_post = log_ext + (log_pool_pre - log_ext) * residual;
-            pool_price_post = log_pool_post.exp();
-
-            // 7) 収益 proxy
-            gross_extraction_usd = (edge_bps / 10_000.0) * config.rebalance_notional_usd;
-
-            let split = apply_revenue_split(gross_extraction_usd, cost_usd_used, config, &window_state);
-
-            protocol_revenue_usd = split.protocol_revenue_usd;
-            validator_searcher_revenue_usd = split.validator_searcher_revenue_usd;
-            net_extraction_usd = split.arb_net_revenue_usd;
-            lp_loss_proxy_usd = split.lp_loss_proxy_usd;
-
             revenue.protocol_revenue_usd += protocol_revenue_usd;
             revenue.validator_searcher_revenue_usd += validator_searcher_revenue_usd;
-            revenue.arb_net_revenue_usd += net_extraction_usd;
             revenue.lp_loss_proxy_usd += lp_loss_proxy_usd;
 
-            total_gross += gross_extraction_usd;
-            total_net += net_extraction_usd;
-            sum_edge_bps_when_arb += edge_bps;
-            sum_threshold_bps_used += threshold_bps_used;
-            sum_cost_usd_used += cost_usd_used;
-            
+            total_gross += validator_searcher_revenue_usd + protocol_revenue_usd;
+            total_net += validator_searcher_revenue_usd;
         }
 
+        let drift_pre_abs = relative_diff(pool_price_pre, ext_price);
         let drift_post_abs = relative_diff(pool_price_post, ext_price);
 
         sum_drift_pre += drift_pre_abs;
@@ -382,12 +399,12 @@ pub fn run_simulation(
             drift_pre_abs,
             drift_post_abs,
             arb_fired,
-            edge_bps,
-            threshold_bps_used,
-            cost_usd_used,
-            gross_extraction_usd,
-            net_extraction_usd,
-            pfda_winner_active: winner_active,
+            edge_bps: z_bps,
+            threshold_bps_used: if matches!(config.auction_mode, AuctionMode::Vanilla) { f } else { winner_cost },
+            cost_usd_used: 0.0,
+            gross_extraction_usd: validator_searcher_revenue_usd + protocol_revenue_usd,
+            net_extraction_usd: validator_searcher_revenue_usd,
+            pfda_winner_active: matches!(config.auction_mode, AuctionMode::PfdaWindowed(_)),
             protocol_revenue_usd,
             validator_searcher_revenue_usd,
             lp_loss_proxy_usd,
@@ -698,15 +715,19 @@ fn default_real_calibrated_base_config() -> SimulationConfig {
 // Preset experiment helpers (3 Pools Validation)
 // =========================
 
+// =========================
+// Preset experiment helpers (3 Pools Validation)
+// =========================
+
 pub fn run_pfda_baseline_vs_pfda() -> Result<Vec<SimulationSummary>> {
     let mut out = Vec::new();
 
     // 共通のPFDAパラメータ（最適な結果が出た設定）
     let optimal_pfda_params = PfdaParams {
         window_slots: 50,
-        fee_discount_bps: 1.0,
+        fee_discount_bps: 1.25, // プロトコル手数料分（s）を丸ごと割引
         auction_payment_mode: AuctionPaymentMode::RealizedExcessShare,
-        auction_competitiveness_alpha: 0.9, // 競争激化を想定
+        auction_competitiveness_alpha: 1.0, // 競争激化（全額還元）を想定
     };
 
     // ---------------------------------------------------------
@@ -714,11 +735,8 @@ pub fn run_pfda_baseline_vs_pfda() -> Result<Vec<SimulationSummary>> {
     // ---------------------------------------------------------
     let mut cfg_standard = SimulationConfig::default();
     cfg_standard.sigma_annual = 0.80; // 年次ボラティリティ 80%
-    cfg_standard.threshold_mode = ThresholdMode::MixtureBps {
-        low_bps: 0.150, base_bps: 1.800, high_bps: 4.300,
-        w_low: 0.2, w_base: 0.6, w_high: 0.2,
-    };
-    cfg_standard.cost_mode = CostMode::FixedUsd(0.0008); // 手数料平均
+    cfg_standard.swap_fee_bps = 5.0;  // f = 5 bps
+    cfg_standard.protocol_fee_bps = 1.25; // s = 1.25 bps
 
     // Vanilla (SOL/USDT)
     cfg_standard.auction_mode = AuctionMode::Vanilla;
@@ -730,17 +748,18 @@ pub fn run_pfda_baseline_vs_pfda() -> Result<Vec<SimulationSummary>> {
     let (s1_p, _) = run_simulation(&cfg_standard, "[Pool 1: SOL/USDT] PFDA TFMM")?;
     out.push(s1_p);
 
-
     // ---------------------------------------------------------
     // プール2: SOL/pippin (ミームコイン・超高ボラティリティ)
     // ---------------------------------------------------------
     let mut cfg_meme = SimulationConfig::default();
-    cfg_meme.sigma_annual = 3.50; // 年次ボラティリティ 350% (激しい乱高下)
-    cfg_meme.threshold_mode = ThresholdMode::MixtureBps {
-        low_bps: 5.0, base_bps: 15.0, high_bps: 35.0, // スプレッドが非常に広い
-        w_low: 0.2, w_base: 0.6, w_high: 0.2,
+    cfg_meme.sigma_annual = 3.50; // 年次ボラティリティ 350%
+    cfg_meme.swap_fee_bps = 30.0;  // ボラが高いので手数料を高めに設定 (f = 30 bps)
+    cfg_meme.protocol_fee_bps = 5.0; // s = 5.0 bps
+
+    let meme_pfda_params = PfdaParams {
+        fee_discount_bps: 5.0, // プロトコル手数料分（s）を割引
+        ..optimal_pfda_params.clone()
     };
-    cfg_meme.cost_mode = CostMode::FixedUsd(0.0020); // 優先手数料が高騰しやすい
 
     // Vanilla (SOL/pippin)
     cfg_meme.auction_mode = AuctionMode::Vanilla;
@@ -748,21 +767,22 @@ pub fn run_pfda_baseline_vs_pfda() -> Result<Vec<SimulationSummary>> {
     out.push(s2_v);
 
     // PFDA (SOL/pippin)
-    cfg_meme.auction_mode = AuctionMode::PfdaWindowed(optimal_pfda_params.clone());
+    cfg_meme.auction_mode = AuctionMode::PfdaWindowed(meme_pfda_params);
     let (s2_p, _) = run_simulation(&cfg_meme, "[Pool 2: SOL/pippin] PFDA TFMM")?;
     out.push(s2_p);
-
 
     // ---------------------------------------------------------
     // プール3: SOL/jitoSOL (LST・超低ボラティリティ)
     // ---------------------------------------------------------
     let mut cfg_lst = SimulationConfig::default();
-    cfg_lst.sigma_annual = 0.10; // 年次ボラティリティ 10% (ほぼ価格が連動)
-    cfg_lst.threshold_mode = ThresholdMode::MixtureBps {
-        low_bps: 0.05, base_bps: 0.20, high_bps: 0.50, // スプレッドが極端に狭い
-        w_low: 0.2, w_base: 0.6, w_high: 0.2,
+    cfg_lst.sigma_annual = 0.10; // 年次ボラティリティ 10%
+    cfg_lst.swap_fee_bps = 1.0;   // LSTなので手数料は極小 (f = 1 bps)
+    cfg_lst.protocol_fee_bps = 0.25; // s = 0.25 bps
+
+    let lst_pfda_params = PfdaParams {
+        fee_discount_bps: 0.25, // プロトコル手数料分（s）を割引
+        ..optimal_pfda_params.clone()
     };
-    cfg_lst.cost_mode = CostMode::FixedUsd(0.0004); // 安い手数料で細かく抜かれる
 
     // Vanilla (SOL/jitoSOL)
     cfg_lst.auction_mode = AuctionMode::Vanilla;
@@ -770,7 +790,7 @@ pub fn run_pfda_baseline_vs_pfda() -> Result<Vec<SimulationSummary>> {
     out.push(s3_v);
 
     // PFDA (SOL/jitoSOL)
-    cfg_lst.auction_mode = AuctionMode::PfdaWindowed(optimal_pfda_params.clone());
+    cfg_lst.auction_mode = AuctionMode::PfdaWindowed(lst_pfda_params);
     let (s3_p, _) = run_simulation(&cfg_lst, "[Pool 3: SOL/jitoSOL] PFDA TFMM")?;
     out.push(s3_p);
 
@@ -815,32 +835,20 @@ pub struct PfdaSweepRow {
     pub lp_loss_delta_usd: f64,
 }
 
+
+// =========================
+// Phase 5.1: PFDA parameter sweep
+// =========================
+
 pub fn run_pfda_parameter_sweep() -> Result<Vec<PfdaSweepRow>> {
     let mut rows = Vec::new();
 
-    // ---- Shared calibrated baseline config (from Phase 4.x outputs) ----
+    // ---- Shared calibrated baseline config ----
     let mut base = SimulationConfig::default();
 
-    // Threshold calibration (Phase 3.7/3.8-ish proxy)
-    base.threshold_mode = ThresholdMode::MixtureBps {
-        low_bps: 1.0,
-        base_bps: 2.5,
-        high_bps: 4.5,
-        w_low: 0.2,
-        w_base: 0.6,
-        w_high: 0.2,
-    };
-
-    // Cost calibration (replace these if newer Phase 4.2 quantiles differ)
-    // You can wire these from CSV later; for now fixed constants are fine.
-    base.cost_mode = CostMode::MixtureUsd {
-        low_usd: 0.000409,
-        base_usd: 0.000828,
-        high_usd: 0.001779,
-        w_low: 0.2,
-        w_base: 0.6,
-        w_high: 0.2,
-    };
+    // 論文に合わせた手数料パラメータに固定
+    base.swap_fee_bps = 5.0;
+    base.protocol_fee_bps = 1.25;
 
     // Make sim a bit more stable for sweep comparisons
     base.slots = 5000;
@@ -853,8 +861,8 @@ pub fn run_pfda_parameter_sweep() -> Result<Vec<PfdaSweepRow>> {
 
     // ---- Sweep grids ----
     let window_slots_grid = [10_usize, 25, 50, 100, 250];
-    let fee_discount_bps_grid = [0.5_f64, 1.0, 2.0, 3.0];
-    let alpha_grid = [0.25_f64, 0.50, 0.75, 0.90];
+    let fee_discount_bps_grid = [0.25_f64, 0.5, 1.0, 1.25];
+    let alpha_grid = [0.25_f64, 0.50, 0.75, 1.0];
 
     for &window_slots in &window_slots_grid {
         for &fee_discount_bps in &fee_discount_bps_grid {
@@ -889,11 +897,9 @@ pub fn run_pfda_parameter_sweep() -> Result<Vec<PfdaSweepRow>> {
 
                 rows.push(PfdaSweepRow {
                     label,
-
                     window_slots,
                     fee_discount_bps,
                     alpha,
-
                     vanilla_lvr_proxy_usd: vanilla_summary.lvr_proxy_usd,
                     vanilla_lvr_proxy_ratio: vanilla_summary.lvr_proxy_ratio,
                     vanilla_arb_rate: vanilla_summary.arb_rate,
@@ -929,31 +935,30 @@ pub fn run_pfda_parameter_sweep() -> Result<Vec<PfdaSweepRow>> {
 
     Ok(rows)
 }
-
 // =========================
 // Phase 6: Paper Micro-structure Export
 // =========================
 
 pub fn export_paper_microstructure_csv(file_path: &str) -> Result<()> {
-    
     let mut cfg = SimulationConfig::default();
     cfg.slots = 5000;
-    cfg.sigma_annual = 0.80;
+    cfg.sigma_annual = 0.80; // Volatility
     cfg.seed = 42;
-    cfg.threshold_mode = ThresholdMode::MixtureBps {
-        low_bps: 0.150, base_bps: 1.800, high_bps: 4.300,
-        w_low: 0.2, w_base: 0.6, w_high: 0.2,
-    };
-    cfg.cost_mode = CostMode::FixedUsd(0.0008);
 
+    // Uniswap論文 (Table 1) に準拠した手数料設定
+    cfg.swap_fee_bps = 5.0;
+    cfg.protocol_fee_bps = 1.25;
+
+    // Vanilla (手数料割引なし)
     cfg.auction_mode = AuctionMode::Vanilla;
     let (_, obs_vanilla) = run_simulation(&cfg, "Vanilla")?;
 
+    // PFDA-TFMM (10スロット = 4秒のバッチオークション。Axis論文のコア設計)
     cfg.auction_mode = AuctionMode::PfdaWindowed(PfdaParams {
-        window_slots: 10,
-        fee_discount_bps: 1.0,
+        window_slots: 10, // 10 slots × 400ms = 4秒ごとに一括清算
+        fee_discount_bps: cfg.protocol_fee_bps,
         auction_payment_mode: AuctionPaymentMode::RealizedExcessShare,
-        auction_competitiveness_alpha: 0.9,
+        auction_competitiveness_alpha: 1.0,
     });
     let (_, obs_pfda) = run_simulation(&cfg, "PFDA")?;
 
@@ -1003,11 +1008,7 @@ pub fn export_paper_microstructure_csv(file_path: &str) -> Result<()> {
 
 impl SlotObservation {
     fn arb_net_revenue_usd(&self) -> f64 {
-    
-        if self.pfda_winner_active {
-            self.net_extraction_usd
-        } else {
-            self.validator_searcher_revenue_usd + self.net_extraction_usd
-        }
+        // searcher/validatorが取得した利益（MEV流出分）
+        self.validator_searcher_revenue_usd
     }
 }
