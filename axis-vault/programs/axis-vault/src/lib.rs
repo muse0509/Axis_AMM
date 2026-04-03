@@ -123,3 +123,24 @@ pub fn process_instruction(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::state::*;
+    #[test]
+    fn print_sizes() {
+        let size = core::mem::size_of::<EtfState>();
+        eprintln!("EtfState: {} bytes", size);
+        let e = unsafe { core::mem::zeroed::<EtfState>() };
+        let b = &e as *const _ as usize;
+        eprintln!("  authority: {}", (&e.authority as *const _ as usize) - b);
+        eprintln!("  etf_mint: {}", (&e.etf_mint as *const _ as usize) - b);
+        eprintln!("  token_count: {}", (&e.token_count as *const _ as usize) - b);
+        eprintln!("  token_mints: {}", (&e.token_mints as *const _ as usize) - b);
+        eprintln!("  token_vaults: {}", (&e.token_vaults as *const _ as usize) - b);
+        eprintln!("  weights_bps: {}", (&e.weights_bps as *const _ as usize) - b);
+        eprintln!("  total_supply: {}", (&e.total_supply as *const _ as usize) - b);
+        eprintln!("  treasury: {}", (&e.treasury as *const _ as usize) - b);
+        eprintln!("  bump: {}", (&e.bump as *const _ as usize) - b);
+    }
+}

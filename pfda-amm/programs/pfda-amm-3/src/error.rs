@@ -23,6 +23,11 @@ pub enum Pfda3Error {
     DivisionByZero = 8017,
     PoolPaused = 8018,
     TreasuryMismatch = 8019,
+    OracleInvalid = 8020,
+    OraclePriceNegative = 8021,
+    OracleStale = 8022,
+    OracleInsufficientSamples = 8023,
+    BidTooLow = 8024,
 }
 
 impl From<Pfda3Error> for ProgramError {

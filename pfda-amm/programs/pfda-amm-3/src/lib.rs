@@ -13,6 +13,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 pub mod error;
 pub mod instructions;
+pub mod jito;
+pub mod oracle;
 pub mod security;
 pub mod state;
 
@@ -99,7 +101,16 @@ pub fn process_instruction(
         }
 
         Instruction::ClearBatch => {
-            instructions::process_clear_batch_3(program_id, accounts)
+            // Data: [bid_lamports: u64 LE] (optional, 0 if no bid)
+            let bid_lamports = if data.len() >= 8 {
+                u64::from_le_bytes([
+                    data[0], data[1], data[2], data[3],
+                    data[4], data[5], data[6], data[7],
+                ])
+            } else {
+                0
+            };
+            instructions::process_clear_batch_3(program_id, accounts, bid_lamports)
         }
 
         Instruction::Claim => {

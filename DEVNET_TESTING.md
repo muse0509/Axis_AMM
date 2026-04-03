@@ -14,14 +14,45 @@ All programs accept **any SPL tokens** — the token choice is a deployment-time
 
 ## Deployed Programs (Devnet)
 
-| Program | ID | Purpose |
+| Program | ID | Role |
 |---|---|---|
-| **pfda-amm** | `CSBgQGeBTiAu4a9Kgoas2GyR8wbHg5jxctQjq3AenKk` | ETF A: 2-token PFDA batch auction (Muse's original + Switchboard + Jito) |
-| **pfda-amm-3** | `DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf` | ETF A: 3-token PFDA batch auction (for SOL/BONK/WIF or any 3 tokens) |
-| **axis-g3m** | `65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi` | ETF B: 5-token G3M AMM with drift-based rebalancing |
+| **pfda-amm** | `CSBgQGeBTiAu4a9Kgoas2GyR8wbHg5jxctQjq3AenKk` | Legacy: 2-token PFDA (Muse's original + Switchboard + Jito). Kept as regression test. |
+| **pfda-amm-3** | `DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf` | **Canonical ETF A**: 3-token PFDA batch auction with Switchboard oracle bounding + Jito bid/treasury |
+| **axis-g3m** | `65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi` | **Canonical ETF B**: 5-token G3M AMM with keeper-triggered drift-based rebalancing |
 | **axis-vault** | `DeeUnCHcnPG8arbjGTLhTKeDhpPUBper3TDrpFPHnCwy` | ETF token lifecycle: create, deposit/mint, withdraw/burn |
 
 Upgrade authority: `6t4B1TVgSjnAM9h5MpahLhGc9MtWFTGmcaPsy9JGskoV`
+
+---
+
+## Canonical A/B Test Paths
+
+### ETF A: 3-Token PFDA (pfda-amm-3)
+
+The canonical test path for ETF A uses the **3-token PFDA** program with oracle bounding and bid/treasury payment.
+
+```bash
+cd pfda-amm/programs/pfda-amm-3/client
+npm install
+npx ts-node oracle-bid-e2e.ts   # Full canonical path: oracle + bid + treasury
+npx ts-node e2e.ts               # Basic path without oracle/bid (faster, for quick checks)
+```
+
+### ETF B: 5-Token G3M (axis-g3m)
+
+```bash
+cd axis-g3m/client
+npm install
+npx ts-node e2e-devnet.ts
+```
+
+### One-Command Rehearsal
+
+```bash
+cd scripts
+npm install
+npx ts-node run-ab-rehearsal.ts   # Runs both ETF A + ETF B canonical flows
+```
 
 ---
 
@@ -73,88 +104,96 @@ cd SolanaAMM
 
 ---
 
-## Test ETF B: G3M (5-token pool)
+## ETF A Details: 3-Token PFDA Batch Auction
 
-This creates a pool with 5 test tokens, executes swaps, checks drift, and rebalances.
+The canonical ETF A test (`oracle-bid-e2e.ts`) exercises:
 
-```bash
-cd axis-g3m/client
-npm install
-npx ts-node e2e-devnet.ts
+1. Creates 3 test token mints
+2. Initializes a PFDA pool (33.3% weight each, 100-slot batch window, 30bps fee)
+3. Adds liquidity (1B tokens per vault)
+4. Submits a swap request: 10M tokens of token 0, wanting token 1
+5. Waits for the batch window to end (~40 seconds on devnet)
+6. **Clears the batch with 3 Switchboard oracle accounts + bid payment to treasury**
+7. Claims output tokens
+8. **Verifies treasury balance increased** from bid payment
+
+**Expected output:**
+```
+InitPool      :  ~12,000 CU
+SwapRequest   :  ~10,700 CU
+ClearBatch    :  ~16,000 CU  (O(1) — same CU regardless of order count)
+Claim         :   ~1,900 CU
+Treasury delta: +1,000,000 lamports (0.001 SOL bid)
 ```
 
-**What it does:**
-1. Creates 5 test token mints (any arbitrary SPL tokens)
-2. Creates user token accounts and mints 100,000 tokens each
-3. Initializes a G3M pool (5 tokens, 20% weight each, 1% fee, 5% drift threshold)
-4. Executes a small swap (10 tokens: token 0 → token 1)
-5. Checks drift levels
-6. Executes a large swap (200 tokens) to push drift above 5%
+### Switchboard Oracle Integration
+
+- `oracle.rs` reads raw bytes from Switchboard PullFeedAccountData accounts
+- Price is at byte offset 1272 (i128 scaled by 10^18), verified against live devnet feed
+- Pass 3 oracle feed accounts as accounts[6..8] in ClearBatch
+- Clearing price is bounded within ±5% of oracle price
+- If oracle feeds fail to read, falls back to invariant-based pricing (graceful degradation)
+
+### Jito Bid / Treasury Integration
+
+- ClearBatch accepts `bid_lamports` in instruction data (first 8 bytes after discriminant)
+- If `bid_lamports > 0` and accounts[9] is a valid treasury, SOL transfers from cranker to treasury
+- Minimum bid: 0.001 SOL (anti-spam)
+- Revenue split: 50% protocol / 50% LP (configurable via `alpha_bps`)
+
+---
+
+## ETF B Details: 5-Token G3M AMM
+
+**Rebalancing semantics: keeper-triggered on threshold breach.** The on-chain program computes drift but does not automatically execute rebalancing in the same transaction. Instead, a keeper bot monitors drift via the `CheckDrift` instruction and triggers `Rebalance` when the threshold is exceeded. This avoids the complexity and attack surface of on-chain Jupiter CPI.
+
+The test (`e2e-devnet.ts`) exercises:
+
+1. Creates 5 test token mints (simulating CEX-unlisted memecoins)
+2. Initializes a G3M pool (5 tokens, 20% weight each, 1% fee, 5% drift threshold)
+3. Executes a small swap (10 tokens: token 0 → token 1)
+4. **CheckDrift — returns structured data: max_drift_bps, token index, threshold, needs_rebalance**
+5. Executes a large swap (200 tokens) to push drift above 5%
+6. **CheckDrift again — shows threshold exceeded**
 7. Rebalances the pool back to target weights
-8. Prints CU consumption for every instruction
 
 **Expected output:**
 ```
 InitializePool  :  ~22,000 CU
 Swap            :  ~18,000 CU
 CheckDrift      :   ~3,100 CU
+  Max drift    : 42 bps (token 0)     ← below threshold
+  Needs rebal  : false
+LargeSwap       :  ~18,000 CU
+CheckDrift (post-big-swap):
+  Max drift    : 812 bps (token 2)    ← above 500 bps threshold
+  Needs rebal  : true ** THRESHOLD EXCEEDED **
 Rebalance       :  ~13,300 CU
 ```
 
-**Note:** Each wallet gets its own pool (PDA derived from your pubkey). If you run it twice, the second run will fail with "account already in use" — that just means your pool already exists from the first run.
+### G3M Invariant
+
+Maintains `∏ x_i^{w_i} = k` where x_i are reserves and w_i are target weights. Swaps are priced to preserve the invariant. Fee accrual makes k monotonically increasing.
+
+### Drift-Based Rebalancing
+
+- Drift = |actual_weight - target_weight| / target_weight (in basis points)
+- When any token's drift exceeds the threshold (default 5%), the pool is eligible for keeper rebalance
+- Keeper executes Jupiter swaps off-chain, then calls `Rebalance` on-chain to update state
+- On-chain: verifies reserves, recomputes invariant k, enforces cooldown
+- This is the two-step pattern used by production protocols (Drift, Mango, etc.)
 
 ---
 
-## Test ETF A: 3-Token PFDA (batch auction)
+## Legacy Test Scripts (Regression)
 
-This creates a 3-token pool, submits a swap intent, waits for the batch window to close, clears the batch, and claims output tokens.
-
-```bash
-cd pfda-amm/programs/pfda-amm-3/client
-npm install
-npx ts-node e2e.ts
-```
-
-**What it does:**
-1. Creates 3 test token mints
-2. Initializes a PFDA pool (33.3% weight each, 100-slot batch window, 30bps fee)
-3. Adds liquidity (1,000 tokens per vault)
-4. Submits a swap request: 10 tokens of token 0, wanting token 1
-5. Waits for the batch window to end (~40 seconds on devnet)
-6. Clears the batch (O(1) settlement — all intents settled at one price)
-7. Claims output tokens (should receive ~9.97 tokens after 30bps fee)
-
-**Expected output:**
-```
-InitPool      :  ~12,000 CU
-SwapRequest   :  ~10,700 CU
-ClearBatch    :  ~16,000 CU  ← the key O(1) metric
-Claim         :   ~1,900 CU
-Token 1 received: 9,970,000  (= 9.97 tokens after 30bps fee)
-```
-
----
-
-## Test Switchboard Oracle Integration
-
-This tests that ClearBatch can read real price data from a Switchboard oracle feed on devnet.
+These use the 2-token PFDA program (`pfda-amm`). They are retained as regression tests but are **not** the canonical ETF A path.
 
 ```bash
 cd pfda-amm/client
-npm install
-npx ts-node test-oracle.ts
-```
-
-**What it does:**
-1. Creates a 2-token PFDA pool
-2. Adds liquidity and submits a swap
-3. Calls ClearBatch with a **real Switchboard price feed** (`BV9mGAy5MJLYWJT5HF74izYKjF9CmL4BqkswfTu9gW2w`) passed as an oracle account
-4. Verifies the instruction succeeds with the oracle data
-
-**Expected output:**
-```
-ClearBatch with oracle: CU = ~26,400
-Oracle integration test PASSED
+npx ts-node e2e.ts              # 2-token basic flow
+npx ts-node test-oracle.ts      # 2-token oracle integration
+npx ts-node test-jito-bid.ts    # 2-token Jito bid verification
 ```
 
 ---
@@ -167,7 +206,7 @@ Compares both ETFs side by side on a local test validator.
 # Terminal 1: Start validator with all programs
 cd SolanaAMM
 solana-test-validator \
-  --bpf-program CSBgQGeBTiAu4a9Kgoas2GyR8wbHg5jxctQjq3AenKk pfda-amm/target/deploy/pfda_amm.so \
+  --bpf-program DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf pfda-amm/target/deploy/pfda_amm_3.so \
   --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi axis-g3m/target/deploy/axis_g3m.so \
   --reset
 
@@ -204,11 +243,11 @@ cd ../axis-g3m && cargo test
 
 ```bash
 # Generate fresh program keypairs
-solana-keygen new --outfile my-pfda.json --no-bip39-passphrase
+solana-keygen new --outfile my-pfda3.json --no-bip39-passphrase
 solana-keygen new --outfile my-g3m.json --no-bip39-passphrase
 
 # Deploy (requires ~1 SOL per program)
-solana program deploy pfda-amm/target/deploy/pfda_amm.so --program-id my-pfda.json
+solana program deploy pfda-amm/target/deploy/pfda_amm_3.so --program-id my-pfda3.json
 solana program deploy axis-g3m/target/deploy/axis_g3m.so --program-id my-g3m.json
 
 # Update PROGRAM_ID in the client scripts to match your new IDs
@@ -222,77 +261,42 @@ solana program deploy axis-g3m/target/deploy/axis_g3m.so --program-id my-g3m.jso
 SolanaAMM/
 ├── pfda-amm/                         # ETF A programs
 │   ├── programs/
-│   │   ├── pfda-amm/                 # 2-token PFDA (Muse's original)
+│   │   ├── pfda-amm/                 # Legacy: 2-token PFDA (regression tests only)
 │   │   │   └── src/
-│   │   │       ├── lib.rs            # Entrypoint (6 instructions)
-│   │   │       ├── instructions/     # InitPool, SwapRequest, ClearBatch, Claim, AddLiquidity, UpdateWeight
-│   │   │       ├── state/            # PoolState, BatchQueue, UserOrderTicket, ClearedBatchHistory
-│   │   │       ├── math/fp64.rs      # Q32.32 fixed-point: log2, exp2, pow, G3M clearing price
-│   │   │       ├── oracle.rs         # Switchboard price feed reader (zero-dependency)
-│   │   │       └── jito.rs           # Jito auction bid enforcement + revenue split
+│   │   │       ├── oracle.rs         # Switchboard price feed reader
+│   │   │       └── jito.rs           # Jito auction bid enforcement
 │   │   │
-│   │   └── pfda-amm-3/              # 3-token PFDA (new)
+│   │   └── pfda-amm-3/              # ★ Canonical ETF A: 3-token PFDA
 │   │       └── src/
-│   │           ├── lib.rs            # Entrypoint (4 instructions)
-│   │           ├── instructions/     # InitPool, SwapRequest, ClearBatch, Claim
-│   │           └── state/            # PoolState3, BatchQueue3, UserOrderTicket3, ClearedBatchHistory3
+│   │           ├── lib.rs            # Entrypoint (6 instructions)
+│   │           ├── instructions/     # InitPool, SwapRequest, ClearBatch, Claim, AddLiquidity, WithdrawFees
+│   │           ├── state/            # PoolState3, BatchQueue3, UserOrderTicket3, ClearedBatchHistory3
+│   │           ├── oracle.rs         # Switchboard oracle (ported from 2-token)
+│   │           └── jito.rs           # Jito bid/treasury (ported from 2-token)
 │   │
-│   └── client/                       # Muse's e2e + oracle test
+│   └── client/                       # Legacy 2-token e2e + oracle test
 │
-├── axis-g3m/                         # ETF B program
+├── axis-g3m/                         # ★ Canonical ETF B: 5-token G3M
 │   ├── programs/axis-g3m/
 │   │   └── src/
-│   │       ├── lib.rs                # Entrypoint (4 instructions)
 │   │       ├── instructions/         # InitializePool, Swap, CheckDrift, Rebalance
-│   │       ├── state/pool_state.rs   # G3mPoolState (5-token, 464 bytes)
+│   │       ├── state/pool_state.rs   # G3mPoolState (drift computation, invariant k)
 │   │       ├── math/fp64.rs          # G3M invariant + swap math
-│   │       ├── jupiter.rs            # Vault balance reader for Jupiter rebalance pattern
-│   │       └── error.rs              # Error codes 7000-7017
+│   │       ├── jupiter.rs            # Vault balance reader for keeper rebalance
+│   │       └── error.rs
 │   └── client/                       # e2e tests (local + devnet)
 │
 ├── axis-vault/                        # ETF token lifecycle
-│   ├── programs/axis-vault/
-│   │   └── src/
-│   │       ├── lib.rs                # Entrypoint (3 instructions)
-│   │       ├── instructions/         # CreateEtf, Deposit, Withdraw
-│   │       ├── state/etf.rs          # EtfState (basket config + ETF mint)
-│   │       └── error.rs              # Error codes 9000-9010
-│   └── (no client yet — coming soon)
+│   └── programs/axis-vault/src/
 │
-├── solana-tfmm-rs/                   # Economic simulation (Muse's, unchanged)
-├── benchmark/                        # A/B CU comparison script
-├── scripts/                          # Switchboard feed setup
+├── scripts/                          # Metrics collector, rehearsal, Switchboard setup
+├── benchmark/                        # A/B CU comparison
 └── DEVNET_TESTING.md                 # This file
 ```
 
 ---
 
-## How the Integrations Work
-
-### Switchboard (ETF A oracle)
-- `oracle.rs` reads raw bytes from Switchboard PullFeedAccountData accounts
-- Price is at byte offset 1272 (i128 scaled by 10^18), verified against live devnet feed
-- Pass feed accounts as accounts[6] and [7] in ClearBatch
-- If feeds are passed, clearing price is bounded within ±5% of oracle price
-- If no feeds passed, falls back to invariant-based pricing (backwards compatible)
-
-### Jito (ETF A auction)
-- Searchers submit Jito bundles containing: SOL bid + ClearBatch + Jito tip
-- ClearBatch accepts `bid_lamports` in instruction data
-- If `bid_lamports > 0` and accounts[8] is a treasury, SOL transfers from cranker to treasury
-- Revenue split: 50% protocol / 50% LP (configurable via `alpha_bps`)
-- The Jito Block Engine selects the highest-tipping bundle off-chain
-
-### Jupiter (ETF B rebalancing)
-- Two-step pattern used by production protocols (Drift, Mango, etc.)
-- Step 1: Keeper bot calls Jupiter API off-chain, executes swap to move tokens between vaults
-- Step 2: Keeper calls Rebalance instruction, passing vault accounts
-- On-chain: reads actual SPL token balances from vaults (trustless — no claimed amounts)
-- Verifies G3M invariant maintained within 1% tolerance
-
----
-
-## Key Concepts for Reviewers
+## Key Concepts
 
 ### O(1) Batch Clearing (ETF A)
 - Swaps are batched into windows (default 10 slots ≈ 4 seconds)
@@ -304,11 +308,23 @@ SolanaAMM/
 ### G3M Invariant (ETF B)
 - Maintains `∏ x_i^{w_i} = k` where x_i are reserves and w_i are target weights
 - Swaps are priced to preserve the invariant. Fee accrual makes k monotonically increasing.
-- Drift = how far actual weights deviate from targets. Rebalance fires at >5%.
+- Drift = how far actual weights deviate from targets. Keeper rebalances at >5%.
 
 ### Fee Handling
 - ETF A: 30bps fee applied at claim time (not at clearing — avoids cancellation bug)
 - ETF B: 1% fee applied at swap time (deducted from input before pricing)
+
+---
+
+## Metrics Collection (48-hour A/B test)
+
+```bash
+cd scripts
+npx ts-node collect-ab-metrics.ts
+# Runs until Ctrl+C. Writes to:
+#   metrics/etf-a-metrics.jsonl
+#   metrics/etf-b-metrics.jsonl
+```
 
 ---
 
@@ -322,3 +338,4 @@ SolanaAMM/
 | Build fails `edition2024` | Run `agave-install update` to get latest Solana CLI |
 | ClearBatch `window not ended` | Increase `WINDOW_SLOTS` in the test or wait longer |
 | `custom program error: 0x1` | Usually means a vault doesn't have enough tokens for the transfer |
+| Oracle clear fails | Oracle feed may be stale. Falls back to invariant pricing automatically. |

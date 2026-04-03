@@ -1,11 +1,17 @@
 /**
- * Axis Protocol — A/B Test Benchmark
+ * Axis Protocol — Legacy PFDA vs G3M CU Benchmark
  *
- * Deploys and benchmarks both ETFs on a local validator:
- *   ETF A: PFDA batch auction (pfda-amm) — SOL/BONK/WIF (2-token pool)
+ * NOTE: This benchmark uses the legacy 2-token PFDA program (pfda-amm),
+ * NOT the canonical 3-token ETF A path (pfda-amm-3).
+ * It is retained for CU regression testing of the original AMM design.
+ *
+ * For the canonical A/B test, use:
+ *   ETF A: pfda-amm/programs/pfda-amm-3/client/oracle-bid-e2e.ts
+ *   ETF B: axis-g3m/client/e2e-devnet.ts
+ *
+ * Deploys and benchmarks on a local validator:
+ *   ETF A (legacy): PFDA batch auction (pfda-amm) — 2-token pool
  *   ETF B: G3M continuous (axis-g3m) — 5-token memecoin pool
- *
- * Measures CU consumption for each instruction type and compares.
  *
  * Prerequisites:
  *   solana-test-validator running with both programs loaded:
@@ -243,9 +249,9 @@ async function main() {
   const payer = loadPayer();
 
   console.log("╔══════════════════════════════════════════════════════════╗");
-  console.log("║   Axis Protocol — A/B Test CU Benchmark                  ║");
-  console.log("║   ETF A: PFDA + Switchboard (2-token)                    ║");
-  console.log("║   ETF B: G3M, no auction (5-token)                       ║");
+  console.log("║   Axis Protocol — Legacy PFDA vs G3M CU Benchmark        ║");
+  console.log("║   PFDA: Legacy 2-token (NOT canonical ETF A)             ║");
+  console.log("║   G3M:  5-token (canonical ETF B)                        ║");
   console.log("╚══════════════════════════════════════════════════════════╝");
 
   const bal = await conn.getBalance(payer.publicKey);

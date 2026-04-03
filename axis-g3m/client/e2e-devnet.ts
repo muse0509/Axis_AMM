@@ -371,11 +371,33 @@ async function main() {
   console.log(`  Reserves : [${poolAfterSwap.reserves.map(r => num(r)).join(", ")}]`);
   console.log();
 
-  // ── 7. CheckDrift ──────────────────────────────────────────────────────
+  // ── 7. CheckDrift (simulate to read return data) ────────────────────────
   console.log("▶ Step 7: CheckDrift");
   const driftTx = new Transaction().add(ixCheckDrift(poolState));
   const driftSig = await sendAndConfirmTransaction(conn, driftTx, [payer]);
   cuLog["CheckDrift"] = await getCU(conn, driftSig);
+
+  // Simulate to get return data
+  const driftSimTx = new Transaction().add(ixCheckDrift(poolState));
+  const { blockhash: driftBh } = await conn.getLatestBlockhash();
+  driftSimTx.recentBlockhash = driftBh;
+  driftSimTx.feePayer = payer.publicKey;
+  driftSimTx.sign(payer);
+  const driftSim = await conn.simulateTransaction(driftSimTx);
+  if (driftSim.value.returnData?.data) {
+    const retBuf = Buffer.from(driftSim.value.returnData.data[0], "base64");
+    const maxDriftBps = retBuf.readBigUInt64LE(0);
+    const maxDriftIdx = retBuf[8];
+    const thresholdBps = retBuf.readUInt16LE(9);
+    const needsRebalance = retBuf[11] !== 0;
+    const invariantKLo = retBuf.readBigUInt64LE(12);
+    console.log(`  Max drift    : ${maxDriftBps} bps (token ${maxDriftIdx})`);
+    console.log(`  Threshold    : ${thresholdBps} bps`);
+    console.log(`  Needs rebal  : ${needsRebalance}`);
+    console.log(`  Invariant k  : ${invariantKLo} (lo)`);
+  } else {
+    console.log(`  (no return data — older runtime?)`);
+  }
   console.log(`  CU : ${cuLog["CheckDrift"]?.toLocaleString()}`);
   console.log();
 
@@ -397,6 +419,26 @@ async function main() {
   const poolAfterBigSwap = await readPoolState(conn, poolState);
   console.log(`  CU       : ${cuLog["LargeSwap"]?.toLocaleString()}`);
   console.log(`  Reserves : [${poolAfterBigSwap.reserves.map(r => num(r)).join(", ")}]`);
+  console.log();
+
+  // ── 8b. CheckDrift after big swap (should show threshold exceeded) ──────
+  console.log("▶ Step 8b: CheckDrift (post-big-swap — expect threshold exceeded)");
+  const driftSim2Tx = new Transaction().add(ixCheckDrift(poolState));
+  const { blockhash: driftBh2 } = await conn.getLatestBlockhash();
+  driftSim2Tx.recentBlockhash = driftBh2;
+  driftSim2Tx.feePayer = payer.publicKey;
+  driftSim2Tx.sign(payer);
+  const driftSim2 = await conn.simulateTransaction(driftSim2Tx);
+  if (driftSim2.value.returnData?.data) {
+    const retBuf2 = Buffer.from(driftSim2.value.returnData.data[0], "base64");
+    const maxDriftBps2 = retBuf2.readBigUInt64LE(0);
+    const maxDriftIdx2 = retBuf2[8];
+    const thresholdBps2 = retBuf2.readUInt16LE(9);
+    const needsRebalance2 = retBuf2[11] !== 0;
+    console.log(`  Max drift    : ${maxDriftBps2} bps (token ${maxDriftIdx2})`);
+    console.log(`  Threshold    : ${thresholdBps2} bps`);
+    console.log(`  Needs rebal  : ${needsRebalance2} ${needsRebalance2 ? "** THRESHOLD EXCEEDED **" : ""}`);
+  }
   console.log();
 
   // ── 9. Rebalance ───────────────────────────────────────────────────────

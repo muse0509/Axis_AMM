@@ -63,20 +63,30 @@ The `ClearBatch` instruction consumes a completely flat ~38,000 CUs regardless o
 
 ## 🚀 Repository Structure & Usage
 
-* `pfda-amm/`: The core Solana smart contract (Rust/Anchor) and TypeScript E2E benchmark clients.
-* `solana-tfmm-rs/`: The Python/Rust simulation engine for empirical LVR calculations and economic modeling.
+### Programs
 
-**To run the on-chain benchmarks locally:**
+| Program | Path | Role |
+|---|---|---|
+| **pfda-amm** | `pfda-amm/programs/pfda-amm/` | Legacy: 2-token PFDA with Switchboard + Jito (regression tests) |
+| **pfda-amm-3** | `pfda-amm/programs/pfda-amm-3/` | **Canonical ETF A**: 3-token PFDA with oracle bounding + bid/treasury |
+| **axis-g3m** | `axis-g3m/programs/axis-g3m/` | **Canonical ETF B**: 5-token G3M with keeper-triggered drift rebalancing |
+| **axis-vault** | `axis-vault/programs/axis-vault/` | ETF token lifecycle: create, deposit/mint, withdraw/burn |
+| **solana-tfmm-rs** | `solana-tfmm-rs/` | Python/Rust simulation engine for LVR calculations |
+
+### Quick Start: Run the A/B Test on Devnet
+
 ```bash
-cd pfda-amm
-cargo build-sbf
-solana-test-validator --bpf-program <PROGRAM_ID> target/deploy/pfda_amm.so
+# ETF A (3-token PFDA with oracle + bid):
+cd pfda-amm/programs/pfda-amm-3/client && npm install && npx ts-node oracle-bid-e2e.ts
 
-# In another terminal:
-cd client
-npm install
-npm run bench
+# ETF B (5-token G3M):
+cd axis-g3m/client && npm install && npx ts-node e2e-devnet.ts
+
+# One-command rehearsal:
+cd scripts && npm install && npx ts-node run-ab-rehearsal.ts
 ```
+
+See [DEVNET_TESTING.md](DEVNET_TESTING.md) for the full testing guide.
 
 ## 📚 References
 Willetts, M. & Harrington, C. (2026). "Pools as Portfolios: Observed arbitrage efficiency & LVR analysis of dynamic weight AMMs." arXiv:2602.22069
