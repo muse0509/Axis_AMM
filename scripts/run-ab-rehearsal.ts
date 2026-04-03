@@ -40,6 +40,65 @@ function loadPayer(): Keypair {
 function u64Le(n: bigint): Buffer { const b = Buffer.alloc(8); b.writeBigUInt64LE(n); return b; }
 function u32Le(n: number): Buffer { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; }
 function u16Le(n: number): Buffer { const b = Buffer.alloc(2); b.writeUInt16LE(n); return b; }
+function tokenAmount(value: bigint | number): bigint {
+  return typeof value === "bigint" ? value : BigInt(value);
+}
+
+type DriftMetrics = {
+  maxDriftBps: bigint;
+  maxDriftIdx: number;
+  thresholdBps: number;
+  needsRebalance: boolean;
+  invariantKLo: bigint;
+};
+
+function decodeDriftMetrics(buf: Buffer): DriftMetrics {
+  return {
+    maxDriftBps: buf.readBigUInt64LE(0),
+    maxDriftIdx: buf[8],
+    thresholdBps: buf.readUInt16LE(9),
+    needsRebalance: buf[11] !== 0,
+    invariantKLo: buf.readBigUInt64LE(12),
+  };
+}
+
+function decodeDriftFromLogs(programId: PublicKey, logs: string[] | null | undefined): DriftMetrics | null {
+  if (!logs) return null;
+
+  const prefix = `Program return: ${programId.toBase58()} `;
+  for (const line of logs) {
+    if (!line.startsWith(prefix)) continue;
+    const encoded = line.slice(prefix.length).trim();
+    if (!encoded) continue;
+    return decodeDriftMetrics(Buffer.from(encoded, "base64"));
+  }
+
+  return null;
+}
+
+async function readDriftMetricsFromSignature(
+  conn: Connection,
+  programId: PublicKey,
+  sig: string,
+): Promise<DriftMetrics | null> {
+  const tx = await conn.getTransaction(sig, {
+    maxSupportedTransactionVersion: 0,
+    commitment: "confirmed",
+  });
+  const meta = tx?.meta as
+    | ({
+        returnData?: { data?: [string, string] };
+        logMessages?: string[] | null;
+      } & Record<string, unknown>)
+    | undefined;
+  if (!meta) return null;
+
+  if (meta.returnData?.data?.[0]) {
+    return decodeDriftMetrics(Buffer.from(meta.returnData.data[0], "base64"));
+  }
+
+  return decodeDriftFromLogs(programId, meta.logMessages);
+}
 
 async function getCU(conn: Connection, sig: string): Promise<number | null> {
   const tx = await conn.getTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: "confirmed" });
@@ -222,7 +281,7 @@ async function runEtfA(conn: Connection, payer: Keypair): Promise<EtfAResult> {
   result.cu["ClearBatch"] = await getCU(conn, clearSig);
 
   // Claim
-  const beforeBal = (await getAccount(conn, userAccts[1])).amount;
+  const beforeBal = tokenAmount((await getAccount(conn, userAccts[1])).amount);
   const claimSig = await sendAndConfirmTransaction(conn, new Transaction().add(
     new TransactionInstruction({ programId: PFDA3_PROGRAM_ID, keys: [
       { pubkey: payer.publicKey, isSigner: true, isWritable: false },
@@ -235,7 +294,7 @@ async function runEtfA(conn: Connection, payer: Keypair): Promise<EtfAResult> {
     ], data: Buffer.from([3]) })), [payer]);
   result.txSigs["Claim"] = claimSig;
   result.cu["Claim"] = await getCU(conn, claimSig);
-  result.tokensOut = (await getAccount(conn, userAccts[1])).amount - beforeBal;
+  result.tokensOut = tokenAmount((await getAccount(conn, userAccts[1])).amount) - beforeBal;
 
   // Treasury check
   const treasAfter = await conn.getBalance(treasury.publicKey);
@@ -353,23 +412,19 @@ async function runEtfB(conn: Connection, payer: Keypair): Promise<EtfBResult> {
   result.txSigs["LargeSwap"] = bigSig;
   result.cu["LargeSwap"] = await getCU(conn, bigSig);
 
-  // CheckDrift via simulate
+  // CheckDrift via confirmed transaction metadata/logs
   const driftIx = new TransactionInstruction({ programId: G3M_PROGRAM_ID,
     keys: [{ pubkey: poolState, isSigner: false, isWritable: false }],
     data: Buffer.from([2]) });
-  const driftTx = new Transaction().add(driftIx);
-  const { blockhash } = await conn.getLatestBlockhash();
-  driftTx.recentBlockhash = blockhash;
-  driftTx.feePayer = payer.publicKey;
-  driftTx.sign(payer);
-  const sim = await conn.simulateTransaction(driftTx);
-  result.cu["CheckDrift"] = sim.value.unitsConsumed ?? null;
+  const driftSig = await sendAndConfirmTransaction(conn, new Transaction().add(driftIx), [payer]);
+  result.txSigs["CheckDrift"] = driftSig;
+  result.cu["CheckDrift"] = await getCU(conn, driftSig);
 
-  if (sim.value.returnData?.data) {
-    const ret = Buffer.from(sim.value.returnData.data[0], "base64");
-    result.driftBps = Number(ret.readBigUInt64LE(0));
-    result.driftToken = ret[8];
-    result.needsRebalance = ret[11] !== 0;
+  const driftMetrics = await readDriftMetricsFromSignature(conn, G3M_PROGRAM_ID, driftSig);
+  if (driftMetrics) {
+    result.driftBps = Number(driftMetrics.maxDriftBps);
+    result.driftToken = driftMetrics.maxDriftIdx;
+    result.needsRebalance = driftMetrics.needsRebalance;
   }
 
   result.pass = result.cu["Swap"] !== null && (result.driftBps ?? 0) > 0;

@@ -73,6 +73,61 @@ function num(n: bigint): string {
   return n.toLocaleString();
 }
 
+type DriftMetrics = {
+  maxDriftBps: bigint;
+  maxDriftIdx: number;
+  thresholdBps: number;
+  needsRebalance: boolean;
+  invariantKLo: bigint;
+};
+
+function decodeDriftMetrics(buf: Buffer): DriftMetrics {
+  return {
+    maxDriftBps: buf.readBigUInt64LE(0),
+    maxDriftIdx: buf[8],
+    thresholdBps: buf.readUInt16LE(9),
+    needsRebalance: buf[11] !== 0,
+    invariantKLo: buf.readBigUInt64LE(12),
+  };
+}
+
+function decodeDriftFromLogs(logs: string[] | null | undefined): DriftMetrics | null {
+  if (!logs) return null;
+
+  const prefix = `Program return: ${PROGRAM_ID.toBase58()} `;
+  for (const line of logs) {
+    if (!line.startsWith(prefix)) continue;
+    const encoded = line.slice(prefix.length).trim();
+    if (!encoded) continue;
+    return decodeDriftMetrics(Buffer.from(encoded, "base64"));
+  }
+
+  return null;
+}
+
+async function readDriftMetricsFromSignature(
+  conn: Connection,
+  sig: string,
+): Promise<DriftMetrics | null> {
+  const tx = await conn.getTransaction(sig, {
+    maxSupportedTransactionVersion: 0,
+    commitment: "confirmed",
+  });
+  const meta = tx?.meta as
+    | ({
+        returnData?: { data?: [string, string] };
+        logMessages?: string[] | null;
+      } & Record<string, unknown>)
+    | undefined;
+  if (!meta) return null;
+
+  if (meta.returnData?.data?.[0]) {
+    return decodeDriftMetrics(Buffer.from(meta.returnData.data[0], "base64"));
+  }
+
+  return decodeDriftFromLogs(meta.logMessages);
+}
+
 // ─── PDA ──────────────────────────────────────────────────────────────────
 
 function findPool(authority: PublicKey) {
@@ -371,32 +426,20 @@ async function main() {
   console.log(`  Reserves : [${poolAfterSwap.reserves.map(r => num(r)).join(", ")}]`);
   console.log();
 
-  // ── 7. CheckDrift (simulate to read return data) ────────────────────────
+  // ── 7. CheckDrift ───────────────────────────────────────────────────────
   console.log("▶ Step 7: CheckDrift");
   const driftTx = new Transaction().add(ixCheckDrift(poolState));
   const driftSig = await sendAndConfirmTransaction(conn, driftTx, [payer]);
   cuLog["CheckDrift"] = await getCU(conn, driftSig);
 
-  // Simulate to get return data
-  const driftSimTx = new Transaction().add(ixCheckDrift(poolState));
-  const { blockhash: driftBh } = await conn.getLatestBlockhash();
-  driftSimTx.recentBlockhash = driftBh;
-  driftSimTx.feePayer = payer.publicKey;
-  driftSimTx.sign(payer);
-  const driftSim = await conn.simulateTransaction(driftSimTx);
-  if (driftSim.value.returnData?.data) {
-    const retBuf = Buffer.from(driftSim.value.returnData.data[0], "base64");
-    const maxDriftBps = retBuf.readBigUInt64LE(0);
-    const maxDriftIdx = retBuf[8];
-    const thresholdBps = retBuf.readUInt16LE(9);
-    const needsRebalance = retBuf[11] !== 0;
-    const invariantKLo = retBuf.readBigUInt64LE(12);
-    console.log(`  Max drift    : ${maxDriftBps} bps (token ${maxDriftIdx})`);
-    console.log(`  Threshold    : ${thresholdBps} bps`);
-    console.log(`  Needs rebal  : ${needsRebalance}`);
-    console.log(`  Invariant k  : ${invariantKLo} (lo)`);
+  const driftMetrics = await readDriftMetricsFromSignature(conn, driftSig);
+  if (driftMetrics) {
+    console.log(`  Max drift    : ${driftMetrics.maxDriftBps} bps (token ${driftMetrics.maxDriftIdx})`);
+    console.log(`  Threshold    : ${driftMetrics.thresholdBps} bps`);
+    console.log(`  Needs rebal  : ${driftMetrics.needsRebalance}`);
+    console.log(`  Invariant k  : ${driftMetrics.invariantKLo} (lo)`);
   } else {
-    console.log(`  (no return data — older runtime?)`);
+    console.log(`  (no drift metrics found in tx metadata/logs)`);
   }
   console.log(`  CU : ${cuLog["CheckDrift"]?.toLocaleString()}`);
   console.log();
@@ -423,21 +466,14 @@ async function main() {
 
   // ── 8b. CheckDrift after big swap (should show threshold exceeded) ──────
   console.log("▶ Step 8b: CheckDrift (post-big-swap — expect threshold exceeded)");
-  const driftSim2Tx = new Transaction().add(ixCheckDrift(poolState));
-  const { blockhash: driftBh2 } = await conn.getLatestBlockhash();
-  driftSim2Tx.recentBlockhash = driftBh2;
-  driftSim2Tx.feePayer = payer.publicKey;
-  driftSim2Tx.sign(payer);
-  const driftSim2 = await conn.simulateTransaction(driftSim2Tx);
-  if (driftSim2.value.returnData?.data) {
-    const retBuf2 = Buffer.from(driftSim2.value.returnData.data[0], "base64");
-    const maxDriftBps2 = retBuf2.readBigUInt64LE(0);
-    const maxDriftIdx2 = retBuf2[8];
-    const thresholdBps2 = retBuf2.readUInt16LE(9);
-    const needsRebalance2 = retBuf2[11] !== 0;
-    console.log(`  Max drift    : ${maxDriftBps2} bps (token ${maxDriftIdx2})`);
-    console.log(`  Threshold    : ${thresholdBps2} bps`);
-    console.log(`  Needs rebal  : ${needsRebalance2} ${needsRebalance2 ? "** THRESHOLD EXCEEDED **" : ""}`);
+  const driftSig2 = await sendAndConfirmTransaction(conn, new Transaction().add(ixCheckDrift(poolState)), [payer]);
+  const driftMetrics2 = await readDriftMetricsFromSignature(conn, driftSig2);
+  if (driftMetrics2) {
+    console.log(`  Max drift    : ${driftMetrics2.maxDriftBps} bps (token ${driftMetrics2.maxDriftIdx})`);
+    console.log(`  Threshold    : ${driftMetrics2.thresholdBps} bps`);
+    console.log(`  Needs rebal  : ${driftMetrics2.needsRebalance} ${driftMetrics2.needsRebalance ? "** THRESHOLD EXCEEDED **" : ""}`);
+  } else {
+    console.log(`  (no drift metrics found in tx metadata/logs)`);
   }
   console.log();
 
