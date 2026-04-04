@@ -1,5 +1,5 @@
 /**
- * PFDA AMM 3-Token — E2E Test on Devnet
+ * PFDA AMM 3-Token — E2E Test
  *
  * Tests the full 3-token batch auction cycle:
  *   1. Create 3 token mints (any arbitrary SPL tokens)
@@ -25,10 +25,10 @@ import {
 import * as fs from "fs";
 import * as os from "os";
 
-const PROGRAM_ID = new PublicKey("DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf");
-const RPC_URL = "https://api.devnet.solana.com";
+const PROGRAM_ID = new PublicKey(process.env.PROGRAM_ID ?? "DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf");
+const RPC_URL = process.env.RPC_URL ?? "https://api.devnet.solana.com";
 
-const WINDOW_SLOTS = 100n; // ~40 seconds — enough time for devnet round-trips
+const WINDOW_SLOTS = BigInt(process.env.WINDOW_SLOTS ?? (RPC_URL.includes("localhost") ? "10" : "100"));
 const BASE_FEE_BPS = 30;
 // Equal weights: 333_333 + 333_333 + 333_334 = 1_000_000
 const WEIGHTS = [333_333, 333_333, 333_334];
@@ -186,10 +186,11 @@ async function main() {
   const payer = loadPayer();
 
   console.log("╔══════════════════════════════════════════════════╗");
-  console.log("║  PFDA AMM 3-Token — E2E Test (Devnet)            ║");
+  console.log("║  PFDA AMM 3-Token — E2E Test                     ║");
   console.log("╚══════════════════════════════════════════════════╝");
   console.log(`Wallet  : ${payer.publicKey.toBase58()}`);
   console.log(`Program : ${PROGRAM_ID.toBase58()}`);
+  console.log(`RPC     : ${RPC_URL}`);
   const bal = await conn.getBalance(payer.publicKey);
   console.log(`Balance : ${(bal / LAMPORTS_PER_SOL).toFixed(2)} SOL\n`);
 

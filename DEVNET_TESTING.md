@@ -36,6 +36,7 @@ cd pfda-amm/programs/pfda-amm-3/client
 npm install
 npx ts-node oracle-bid-e2e.ts   # Full canonical path: oracle + bid + treasury
 npx ts-node e2e.ts               # Basic path without oracle/bid (faster, for quick checks)
+RPC_URL=http://localhost:8899 WINDOW_SLOTS=10 npx ts-node e2e.ts   # Local validator equivalent used in CI
 ```
 
 ### ETF B: 5-Token G3M (axis-g3m)

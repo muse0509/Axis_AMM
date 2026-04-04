@@ -12,8 +12,8 @@ use crate::state::{load, load_mut, EtfState};
 
 /// Deposit — accept basket tokens, mint ETF tokens proportionally.
 ///
-/// First depositor: mint_amount = total_deposited_value * 10^6
-/// Subsequent: mint_amount = deposit_value * total_supply / vault_nav
+/// First depositor: mint_amount = base amount
+/// Subsequent: mint_amount = deposit_share * total_supply
 ///
 /// For V1 (equal-weight baskets): deposit must be proportional to weights.
 /// The user deposits `amount` of each token scaled by weight.
@@ -29,7 +29,7 @@ use crate::state::{load, load_mut, EtfState};
 ///
 /// Data: [amount: u64] — base amount per token (scaled by weight)
 pub fn process_deposit(
-    program_id: &Pubkey,
+    _program_id: &Pubkey,
     accounts: &[AccountInfo],
     amount: u64,
     name: &[u8],
@@ -49,7 +49,7 @@ pub fn process_deposit(
     }
 
     // Load ETF state
-    let (tc, total_supply, authority, weights) = {
+    let (tc, total_supply, authority, weights, bump_seed) = {
         let data = etf_state_ai.try_borrow_data()?;
         let etf = unsafe { load::<EtfState>(&data) }
             .ok_or(ProgramError::InvalidAccountData)?;
@@ -59,20 +59,72 @@ pub fn process_deposit(
         if etf.paused != 0 {
             return Err(VaultError::InvalidDiscriminator.into());
         }
-        (etf.token_count as usize, etf.total_supply, etf.authority, etf.weights_bps)
+        (
+            etf.token_count as usize,
+            etf.total_supply,
+            etf.authority,
+            etf.weights_bps,
+            etf.bump,
+        )
+    };
+
+    if accounts.len() < 5 + tc * 2 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let mut token_amounts = [0u64; 5];
+    for i in 0..tc {
+        token_amounts[i] = (amount as u128)
+            .checked_mul(weights[i] as u128)
+            .ok_or(VaultError::Overflow)?
+            .checked_div(10_000)
+            .ok_or(VaultError::DivisionByZero)? as u64;
+    }
+
+    let mint_amount = if total_supply == 0 {
+        amount
+    } else {
+        let mut min_mint: Option<u128> = None;
+        for i in 0..tc {
+            let vault = &accounts[5 + tc + i];
+            let data = vault.try_borrow_data()?;
+            if data.len() < 72 {
+                return Err(ProgramError::InvalidAccountData);
+            }
+
+            let vault_balance = u64::from_le_bytes(
+                data[64..72]
+                    .try_into()
+                    .map_err(|_| ProgramError::InvalidAccountData)?,
+            );
+            if vault_balance == 0 {
+                return Err(VaultError::DivisionByZero.into());
+            }
+
+            let candidate = (token_amounts[i] as u128)
+                .checked_mul(total_supply as u128)
+                .ok_or(VaultError::Overflow)?
+                .checked_div(vault_balance as u128)
+                .ok_or(VaultError::DivisionByZero)?;
+
+            min_mint = Some(match min_mint {
+                Some(current) => current.min(candidate),
+                None => candidate,
+            });
+        }
+
+        let candidate = min_mint.ok_or(VaultError::DivisionByZero)?;
+        if candidate == 0 {
+            return Err(VaultError::ZeroDeposit.into());
+        }
+        candidate as u64
     };
 
     // Transfer basket tokens from depositor to vaults
     for i in 0..tc {
         let source = &accounts[5 + i];
         let vault = &accounts[5 + tc + i];
-
-        // Each token gets: amount * weight / 10_000
-        let token_amount = (amount as u128)
-            .checked_mul(weights[i] as u128)
-            .ok_or(VaultError::Overflow)?
-            .checked_div(10_000)
-            .ok_or(VaultError::DivisionByZero)? as u64;
+        let token_amount = token_amounts[i];
 
         if token_amount > 0 {
             Transfer {
@@ -85,29 +137,7 @@ pub fn process_deposit(
         }
     }
 
-    // Compute mint amount
-    // First depositor: mint 1:1 (amount * 10^6 for 6 decimal precision)
-    // Subsequent: mint = amount * total_supply / total_deposited
-    let mint_amount = if total_supply == 0 {
-        amount // First deposit: 1:1
-    } else {
-        // Proportional minting based on existing supply
-        // For simplicity: mint = amount * total_supply / (total_supply + amount)
-        // This keeps NAV constant
-        (amount as u128)
-            .checked_mul(total_supply as u128)
-            .ok_or(VaultError::Overflow)?
-            .checked_div((total_supply as u128).checked_add(amount as u128).ok_or(VaultError::Overflow)?)
-            .ok_or(VaultError::DivisionByZero)? as u64
-    };
-
     // Mint ETF tokens to depositor (EtfState PDA signs as mint authority)
-    let bump_seed = {
-        let data = etf_state_ai.try_borrow_data()?;
-        let etf = unsafe { load::<EtfState>(&data) }.ok_or(ProgramError::InvalidAccountData)?;
-        etf.bump
-    };
-
     let bump_bytes = [bump_seed];
     let mint_signer_seeds = [
         Seed::from(b"etf".as_ref()),

@@ -79,6 +79,9 @@ The `ClearBatch` instruction consumes a completely flat ~38,000 CUs regardless o
 # ETF A (3-token PFDA with oracle + bid):
 cd pfda-amm/programs/pfda-amm-3/client && npm install && npx ts-node oracle-bid-e2e.ts
 
+# ETF A local-validator path (same 3-token PFDA flow, no oracle feeds):
+cd pfda-amm/programs/pfda-amm-3/client && npm install && RPC_URL=http://localhost:8899 WINDOW_SLOTS=10 npx ts-node e2e.ts
+
 # ETF B (5-token G3M):
 cd axis-g3m/client && npm install && npx ts-node e2e-devnet.ts
 
