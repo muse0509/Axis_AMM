@@ -315,22 +315,39 @@ async function getCU(conn: Connection, sig: string): Promise<number | null> {
 async function main() {
   const conn = new Connection(RPC_URL, "confirmed");
   const payer = loadPayer();
+  const authority = Keypair.generate();
 
   console.log("╔══════════════════════════════════════════════╗");
   console.log("║   Axis G3M — E2E Test (ETF B: 5 Tokens)     ║");
   console.log("╚══════════════════════════════════════════════╝");
-  console.log(`Wallet  : ${payer.publicKey.toBase58()}`);
+  console.log(`Payer   : ${payer.publicKey.toBase58()}`);
+  console.log(`Run auth: ${authority.publicKey.toBase58()}`);
   console.log(`Program : ${PROGRAM_ID.toBase58()}`);
   const bal = await conn.getBalance(payer.publicKey);
   console.log(`Balance : ${(bal / LAMPORTS_PER_SOL).toFixed(2)} SOL\n`);
 
   const cuLog: Record<string, number | null> = {};
 
+  console.log("▶ Step 0: Fund fresh run authority");
+  await sendAndConfirmTransaction(
+    conn,
+    new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: authority.publicKey,
+        lamports: 1_000_000_000, // 1 SOL
+      }),
+    ),
+    [payer],
+  );
+  const authorityBal = await conn.getBalance(authority.publicKey);
+  console.log(`  Authority balance: ${(authorityBal / LAMPORTS_PER_SOL).toFixed(2)} SOL\n`);
+
   // ── 1. Create 5 token mints ─────────────────────────────────────────────
   console.log("▶ Step 1: Create 5 token mints");
   const mints: PublicKey[] = [];
   for (let i = 0; i < TOKEN_COUNT; i++) {
-    const mint = await createMint(conn, payer, payer.publicKey, null, 6);
+    const mint = await createMint(conn, authority, authority.publicKey, null, 6);
     mints.push(mint);
     console.log(`  Mint ${i}: ${mint.toBase58()}`);
   }
@@ -341,14 +358,14 @@ async function main() {
   const userAccounts: PublicKey[] = [];
   const SUPPLY = 100_000_000_000n; // 100,000 tokens each
   for (let i = 0; i < TOKEN_COUNT; i++) {
-    const ata = await createAccount(conn, payer, mints[i], payer.publicKey);
-    await mintTo(conn, payer, mints[i], ata, payer, SUPPLY);
+    const ata = await createAccount(conn, authority, mints[i], authority.publicKey);
+    await mintTo(conn, authority, mints[i], ata, authority, SUPPLY);
     userAccounts.push(ata);
   }
   console.log(`  Created ${TOKEN_COUNT} accounts, each with ${num(SUPPLY)} lamports\n`);
 
   // ── 3. Derive PDA ───────────────────────────────────────────────────────
-  const [poolState, poolBump] = findPool(payer.publicKey);
+  const [poolState, poolBump] = findPool(authority.publicKey);
   console.log("▶ Step 3: PDA");
   console.log(`  G3mPool : ${poolState.toBase58()} (bump=${poolBump})\n`);
 
@@ -369,7 +386,7 @@ async function main() {
   for (let i = 0; i < TOKEN_COUNT; i++) {
     createVaultsTx.add(
       SystemProgram.createAccount({
-        fromPubkey: payer.publicKey,
+        fromPubkey: authority.publicKey,
         newAccountPubkey: vaultKeypairs[i].publicKey,
         lamports: rentExempt,
         space: ACCOUNT_SIZE,
@@ -382,7 +399,7 @@ async function main() {
       ),
     );
   }
-  await sendAndConfirmTransaction(conn, createVaultsTx, [payer, ...vaultKeypairs]);
+  await sendAndConfirmTransaction(conn, createVaultsTx, [authority, ...vaultKeypairs]);
   for (let i = 0; i < TOKEN_COUNT; i++) {
     console.log(`  Vault ${i}: ${vaultAccounts[i].toBase58()}`);
   }
@@ -391,9 +408,9 @@ async function main() {
   // ── 5. InitializePool ───────────────────────────────────────────────────
   console.log("▶ Step 5: InitializePool (5 tokens, 20% each, 1% fee, 5% drift)");
   const initTx = new Transaction().add(
-    ixInitializePool(payer.publicKey, poolState, userAccounts, vaultAccounts)
+    ixInitializePool(authority.publicKey, poolState, userAccounts, vaultAccounts)
   );
-  const initSig = await sendAndConfirmTransaction(conn, initTx, [payer]);
+  const initSig = await sendAndConfirmTransaction(conn, initTx, [authority]);
   cuLog["InitializePool"] = await getCU(conn, initSig);
 
   const poolAfterInit = await readPoolState(conn, poolState);
@@ -410,14 +427,14 @@ async function main() {
   const SWAP_AMOUNT = 10_000_000n; // 10 tokens
   const swapTx = new Transaction().add(
     ixSwap(
-      payer.publicKey, poolState,
+      authority.publicKey, poolState,
       userAccounts[0], userAccounts[1],
       vaultAccounts[0], vaultAccounts[1],
       0, 1,
       SWAP_AMOUNT, 0n, // min_out = 0 for testing
     )
   );
-  const swapSig = await sendAndConfirmTransaction(conn, swapTx, [payer]);
+  const swapSig = await sendAndConfirmTransaction(conn, swapTx, [authority]);
   cuLog["Swap"] = await getCU(conn, swapSig);
 
   const poolAfterSwap = await readPoolState(conn, poolState);
@@ -429,7 +446,7 @@ async function main() {
   // ── 7. CheckDrift ───────────────────────────────────────────────────────
   console.log("▶ Step 7: CheckDrift");
   const driftTx = new Transaction().add(ixCheckDrift(poolState));
-  const driftSig = await sendAndConfirmTransaction(conn, driftTx, [payer]);
+  const driftSig = await sendAndConfirmTransaction(conn, driftTx, [authority]);
   cuLog["CheckDrift"] = await getCU(conn, driftSig);
 
   const driftMetrics = await readDriftMetricsFromSignature(conn, driftSig);
@@ -449,14 +466,14 @@ async function main() {
   const BIG_SWAP = 200_000_000n; // 200 tokens
   const bigSwapTx = new Transaction().add(
     ixSwap(
-      payer.publicKey, poolState,
+      authority.publicKey, poolState,
       userAccounts[0], userAccounts[2],
       vaultAccounts[0], vaultAccounts[2],
       0, 2,
       BIG_SWAP, 0n,
     )
   );
-  const bigSwapSig = await sendAndConfirmTransaction(conn, bigSwapTx, [payer]);
+  const bigSwapSig = await sendAndConfirmTransaction(conn, bigSwapTx, [authority]);
   cuLog["LargeSwap"] = await getCU(conn, bigSwapSig);
 
   const poolAfterBigSwap = await readPoolState(conn, poolState);
@@ -486,14 +503,14 @@ async function main() {
   const targetReserves = Array(TOKEN_COUNT).fill(avgReserve);
 
   const rebalTx = new Transaction().add(
-    ixRebalance(payer.publicKey, poolState, targetReserves)
+    ixRebalance(authority.publicKey, poolState, targetReserves)
   );
 
   // Simulate first
   const { blockhash } = await conn.getLatestBlockhash();
   rebalTx.recentBlockhash = blockhash;
-  rebalTx.feePayer = payer.publicKey;
-  rebalTx.sign(payer);
+  rebalTx.feePayer = authority.publicKey;
+  rebalTx.sign(authority);
 
   const sim = await conn.simulateTransaction(rebalTx);
   if (sim.value.err) {
@@ -504,9 +521,9 @@ async function main() {
     console.log(`  Simulation CU: ${sim.value.unitsConsumed?.toLocaleString()}`);
 
     const rebalTx2 = new Transaction().add(
-      ixRebalance(payer.publicKey, poolState, targetReserves)
+      ixRebalance(authority.publicKey, poolState, targetReserves)
     );
-    const rebalSig = await sendAndConfirmTransaction(conn, rebalTx2, [payer]);
+    const rebalSig = await sendAndConfirmTransaction(conn, rebalTx2, [authority]);
     cuLog["Rebalance"] = await getCU(conn, rebalSig);
 
     const poolAfterRebal = await readPoolState(conn, poolState);

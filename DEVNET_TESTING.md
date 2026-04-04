@@ -47,6 +47,8 @@ npm install
 npx ts-node e2e-devnet.ts
 ```
 
+The ETF B devnet script now uses a fresh funded run authority each time, so it is safely rerunnable without colliding with an existing `g3m_pool` PDA from a previous successful run.
+
 ### One-Command Rehearsal
 
 ```bash

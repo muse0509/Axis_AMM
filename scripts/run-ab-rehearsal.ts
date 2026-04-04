@@ -327,20 +327,28 @@ async function runEtfB(conn: Connection, payer: Keypair): Promise<EtfBResult> {
   const COOLDOWN = 0n;
   const WEIGHTS = [2000, 2000, 2000, 2000, 2000];
   const INIT_RESERVE = 1_000_000_000n;
+  const authority = Keypair.generate();
+
+  await sendAndConfirmTransaction(conn,
+    new Transaction().add(SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: authority.publicKey,
+      lamports: 1_000_000_000,
+    })), [payer]);
 
   // Mints + accounts
   const mints: PublicKey[] = [];
   const userAccts: PublicKey[] = [];
   for (let i = 0; i < TC; i++) {
-    const mint = await createMint(conn, payer, payer.publicKey, null, 6);
+    const mint = await createMint(conn, authority, authority.publicKey, null, 6);
     mints.push(mint);
-    const ata = await createAccount(conn, payer, mint, payer.publicKey);
-    await mintTo(conn, payer, mint, ata, payer, 100_000_000_000n);
+    const ata = await createAccount(conn, authority, mint, authority.publicKey);
+    await mintTo(conn, authority, mint, ata, authority, 100_000_000_000n);
     userAccts.push(ata);
   }
 
   const [poolState] = PublicKey.findProgramAddressSync(
-    [Buffer.from("g3m_pool"), payer.publicKey.toBuffer()], G3M_PROGRAM_ID);
+    [Buffer.from("g3m_pool"), authority.publicKey.toBuffer()], G3M_PROGRAM_ID);
 
   // Vaults
   const rentExempt = await getMinimumBalanceForRentExemptAccount(conn);
@@ -353,13 +361,13 @@ async function runEtfB(conn: Connection, payer: Keypair): Promise<EtfBResult> {
     vaults.push(kp.publicKey);
     vTx.add(
       SystemProgram.createAccount({
-        fromPubkey: payer.publicKey, newAccountPubkey: kp.publicKey,
+        fromPubkey: authority.publicKey, newAccountPubkey: kp.publicKey,
         lamports: rentExempt, space: ACCOUNT_SIZE, programId: TOKEN_PROGRAM_ID,
       }),
       createInitializeAccountInstruction(kp.publicKey, mints[i], poolState),
     );
   }
-  await sendAndConfirmTransaction(conn, vTx, [payer, ...vaultKps]);
+  await sendAndConfirmTransaction(conn, vTx, [authority, ...vaultKps]);
 
   // InitPool
   const wBuf = Buffer.alloc(TC * 2);
@@ -372,13 +380,13 @@ async function runEtfB(conn: Connection, payer: Keypair): Promise<EtfBResult> {
   ]);
   const initSig = await sendAndConfirmTransaction(conn, new Transaction().add(
     new TransactionInstruction({ programId: G3M_PROGRAM_ID, keys: [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+      { pubkey: authority.publicKey, isSigner: true, isWritable: true },
       { pubkey: poolState, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       ...userAccts.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
-    ], data: initData })), [payer]);
+    ], data: initData })), [authority]);
   result.txSigs["InitPool"] = initSig;
   result.cu["InitPool"] = await getCU(conn, initSig);
 
@@ -386,14 +394,14 @@ async function runEtfB(conn: Connection, payer: Keypair): Promise<EtfBResult> {
   const swapData = Buffer.concat([Buffer.from([1, 0, 1]), u64Le(10_000_000n), u64Le(0n)]);
   const swapSig = await sendAndConfirmTransaction(conn, new Transaction().add(
     new TransactionInstruction({ programId: G3M_PROGRAM_ID, keys: [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+      { pubkey: authority.publicKey, isSigner: true, isWritable: true },
       { pubkey: poolState, isSigner: false, isWritable: true },
       { pubkey: userAccts[0], isSigner: false, isWritable: true },
       { pubkey: userAccts[1], isSigner: false, isWritable: true },
       { pubkey: vaults[0], isSigner: false, isWritable: true },
       { pubkey: vaults[1], isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-    ], data: swapData })), [payer]);
+    ], data: swapData })), [authority]);
   result.txSigs["Swap"] = swapSig;
   result.cu["Swap"] = await getCU(conn, swapSig);
 
@@ -401,14 +409,14 @@ async function runEtfB(conn: Connection, payer: Keypair): Promise<EtfBResult> {
   const bigSwapData = Buffer.concat([Buffer.from([1, 0, 2]), u64Le(200_000_000n), u64Le(0n)]);
   const bigSig = await sendAndConfirmTransaction(conn, new Transaction().add(
     new TransactionInstruction({ programId: G3M_PROGRAM_ID, keys: [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+      { pubkey: authority.publicKey, isSigner: true, isWritable: true },
       { pubkey: poolState, isSigner: false, isWritable: true },
       { pubkey: userAccts[0], isSigner: false, isWritable: true },
       { pubkey: userAccts[2], isSigner: false, isWritable: true },
       { pubkey: vaults[0], isSigner: false, isWritable: true },
       { pubkey: vaults[2], isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-    ], data: bigSwapData })), [payer]);
+    ], data: bigSwapData })), [authority]);
   result.txSigs["LargeSwap"] = bigSig;
   result.cu["LargeSwap"] = await getCU(conn, bigSig);
 
@@ -416,7 +424,7 @@ async function runEtfB(conn: Connection, payer: Keypair): Promise<EtfBResult> {
   const driftIx = new TransactionInstruction({ programId: G3M_PROGRAM_ID,
     keys: [{ pubkey: poolState, isSigner: false, isWritable: false }],
     data: Buffer.from([2]) });
-  const driftSig = await sendAndConfirmTransaction(conn, new Transaction().add(driftIx), [payer]);
+  const driftSig = await sendAndConfirmTransaction(conn, new Transaction().add(driftIx), [authority]);
   result.txSigs["CheckDrift"] = driftSig;
   result.cu["CheckDrift"] = await getCU(conn, driftSig);
 
