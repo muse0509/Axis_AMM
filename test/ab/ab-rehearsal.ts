@@ -16,7 +16,7 @@
 
 import {
   Connection, Keypair, PublicKey, SystemProgram, Transaction,
-  TransactionInstruction, sendAndConfirmTransaction, LAMPORTS_PER_SOL,
+  TransactionInstruction, sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import {
   createMint, createAccount, createInitializeAccountInstruction,
@@ -27,6 +27,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { spawn } from "child_process";
+import { ensureDevnetWalletFunded, formatSol } from "./devnet-wallet";
 
 // ─── Config ──────────────────────────────────────────────────────────────
 
@@ -595,8 +596,15 @@ async function main() {
   console.log("╚══════════════════════════════════════════════════════════╝");
   console.log(`Wallet  : ${payer.publicKey.toBase58()}`);
   console.log(`RPC     : ${RPC_URL}`);
-  const bal = await conn.getBalance(payer.publicKey);
-  console.log(`Balance : ${(bal / LAMPORTS_PER_SOL).toFixed(2)} SOL`);
+  const initialBal = await conn.getBalance(payer.publicKey);
+  console.log(`Balance : ${formatSol(initialBal)} SOL`);
+  const bal = await ensureDevnetWalletFunded(conn, payer, {
+    minBalanceSol: Number(process.env.AB_MIN_BALANCE_SOL ?? "2"),
+    logger: line => console.log(`Funding : ${line}`),
+  });
+  if (bal !== initialBal) {
+    console.log(`Balance : ${formatSol(bal)} SOL (after funding)`);
+  }
   console.log(`Time    : ${new Date().toISOString()}\n`);
 
   // Optionally start collector
@@ -668,7 +676,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     rpcUrl: RPC_URL,
     wallet: payer.publicKey.toBase58(),
-    walletBalanceSol: (bal / LAMPORTS_PER_SOL).toFixed(2),
+    walletBalanceSol: formatSol(bal),
     programs: {
       etfA: PFDA3_PROGRAM_ID.toBase58(),
       etfB: G3M_PROGRAM_ID.toBase58(),

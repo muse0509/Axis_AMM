@@ -63,6 +63,9 @@ jobs:
       - name: Set devnet RPC
         run: solana config set --url devnet
 
+      - name: Ensure devnet wallet funding
+        run: bash ci/ensure-devnet-wallet-funded.sh 2
+
       - name: Generate AB markdown report
         run: bash ci/update-ab-report.sh
 

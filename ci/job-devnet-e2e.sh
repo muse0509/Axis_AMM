@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+solana config set --url devnet
+bash ci/ensure-devnet-wallet-funded.sh 2
+
 bun run e2e:axis-g3m:devnet
 bun run e2e:pfda-amm-3:oracle-bid:devnet
 bun run test:pfda-amm-3:o1-proof

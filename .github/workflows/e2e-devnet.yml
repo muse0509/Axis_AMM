@@ -59,6 +59,9 @@ jobs:
       - name: Set devnet RPC
         run: solana config set --url devnet
 
+      - name: Ensure devnet wallet funding
+        run: bash ci/ensure-devnet-wallet-funded.sh 2
+
       - name: Run Axis G3M devnet e2e
         run: bun run e2e:axis-g3m:devnet
 

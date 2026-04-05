@@ -32,6 +32,8 @@ describe("CI Structure", () => {
     const rustWorkflow = readFile(".github/workflows/reusable-rust.yml");
     const tsWorkflow = readFile(".github/workflows/reusable-typescript.yml");
     const localE2eWorkflow = readFile(".github/workflows/reusable-e2e-local.yml");
+    const devnetWorkflow = readFile(".github/workflows/e2e-devnet.yml");
+    const mainReportWorkflow = readFile(".github/workflows/main-report.yml");
 
     expect(rustWorkflow).toContain("bash ci/job-rust.sh");
     expect(tsWorkflow).toContain("bash ci/job-typescript.sh");
@@ -46,12 +48,15 @@ describe("CI Structure", () => {
     expect(localE2eWorkflow).toContain("bun run e2e:axis-vault:local");
     expect(localE2eWorkflow).toContain("bun run bench:ab");
     expect(localE2eWorkflow).toContain("bash ci/e2e-local-cleanup.sh");
+    expect(devnetWorkflow).toContain("bash ci/ensure-devnet-wallet-funded.sh 2");
+    expect(mainReportWorkflow).toContain("bash ci/ensure-devnet-wallet-funded.sh 2");
   });
 
   test("required CI scripts are tracked", () => {
     const requiredScripts = [
       "ci/setup-rust.sh",
       "ci/install-solana.sh",
+      "ci/ensure-devnet-wallet-funded.sh",
       "ci/rust-tests.sh",
       "ci/rust-build-sbf.sh",
       "ci/rust-lint.sh",
