@@ -1,0 +1,9 @@
+{
+  "name": "axis-g3m-client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "e2e:local": "bun axis-g3m.local.e2e.ts",
+    "e2e:devnet": "bun axis-g3m.devnet.e2e.ts"
+  }
+}

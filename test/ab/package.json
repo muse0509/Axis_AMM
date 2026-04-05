@@ -1,0 +1,9 @@
+{
+  "name": "axis-ab-tests",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "rehearsal": "bun ab-rehearsal.ts",
+    "collect": "bun collect-ab-metrics.ts"
+  }
+}

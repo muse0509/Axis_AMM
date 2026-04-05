@@ -6,8 +6,8 @@
  * It is retained for CU regression testing of the original AMM design.
  *
  * For the canonical A/B test, use:
- *   ETF A: contracts/pfda-amm-3/client/oracle-bid-e2e.ts
- *   ETF B: axis-g3m/client/e2e-devnet.ts
+ *   ETF A: test/e2e/pfda-amm-3/pfda-amm-3.oracle-bid.devnet.e2e.ts
+ *   ETF B: test/e2e/axis-g3m/axis-g3m.devnet.e2e.ts
  *
  * Deploys and benchmarks on a local validator:
  *   ETF A (legacy): PFDA batch auction (pfda-amm) — 2-token pool

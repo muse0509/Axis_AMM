@@ -1,0 +1,50 @@
+{
+  "name": "solana-amm-tooling",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "bun@1.3.6",
+  "scripts": {
+    "setup:feeds": "bun scripts/setup-switchboard-feeds.ts",
+    "ab:rehearsal": "bun test/ab/ab-rehearsal.ts",
+    "ab:collect": "bun test/ab/collect-ab-metrics.ts",
+    "bench:ab": "bun test/benchmark/ab-cu-benchmark.ts",
+    "e2e:axis-g3m:local": "bun test/e2e/axis-g3m/axis-g3m.local.e2e.ts",
+    "e2e:axis-g3m:devnet": "bun test/e2e/axis-g3m/axis-g3m.devnet.e2e.ts",
+    "e2e:axis-vault:local": "RPC_URL=http://localhost:8899 bun test/e2e/axis-vault/axis-vault.local.e2e.ts",
+    "e2e:pfda-amm-3:local": "RPC_URL=http://localhost:8899 WINDOW_SLOTS=10 bun test/e2e/pfda-amm-3/pfda-amm-3.local.e2e.ts",
+    "e2e:pfda-amm-3:oracle-bid:devnet": "bun test/e2e/pfda-amm-3/pfda-amm-3.oracle-bid.devnet.e2e.ts",
+    "e2e:pfda-amm-legacy:local": "bun test/e2e/pfda-amm-legacy/pfda-amm-legacy.local.e2e.ts",
+    "test:pfda-amm-3:o1-proof": "bun test/e2e/pfda-amm-3/pfda-amm-3.o1-proof.test.ts",
+    "test:pfda-amm-3:imbalanced": "bun test/e2e/pfda-amm-3/pfda-amm-3.imbalanced.test.ts",
+    "test:pfda-amm-3:multiuser": "bun test/e2e/pfda-amm-3/pfda-amm-3.multiuser.test.ts",
+    "test:pfda-amm-legacy:oracle": "bun test/e2e/pfda-amm-legacy/pfda-amm-legacy.oracle.test.ts",
+    "test:pfda-amm-legacy:jito-bid": "bun test/e2e/pfda-amm-legacy/pfda-amm-legacy.jito-bid.test.ts",
+    "test": "bun run test:jest",
+    "test:jest": "bash ci/jest.sh",
+    "test:jest:devnet": "RUN_SOLANA_DEVNET_TESTS=1 bash ci/jest.sh",
+    "test:jest:local": "RUN_SOLANA_LOCAL_TESTS=1 bash ci/jest.sh",
+    "typecheck": "bash ci/ts-typecheck.sh",
+    "lint": "bash ci/lint-all.sh",
+    "lint:rust": "bash ci/rust-lint.sh",
+    "lint:ts": "bash ci/ts-lint.sh",
+    "ci:rust:test": "bash ci/rust-tests.sh",
+    "ci:rust:build-sbf": "bash ci/rust-build-sbf.sh",
+    "ci:rust-and-typescript": "bash ci/job-rust-and-typescript.sh",
+    "ci:local-e2e": "bash ci/job-local-e2e.sh"
+  },
+  "dependencies": {
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.95.3",
+    "@switchboard-xyz/on-demand": "^2.17.0",
+    "md-to-pdf": "^5.2.4"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.14.1",
+    "eslint": "^9.24.0",
+    "globals": "^15.15.0",
+    "jest": "^29.7.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.30.1"
+  }
+}

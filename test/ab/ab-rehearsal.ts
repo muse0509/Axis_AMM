@@ -2,14 +2,16 @@
  * Axis Protocol — A/B Test Rehearsal Script
  *
  * One-command orchestrator that runs the ETF A canonical devnet flow and the
- * current ETF B rehearsal flow, then prints a compact summary.
+ * current ETF B rehearsal flow, then prints and exports a complete report.
  *
  * Usage:
- *   npx ts-node run-ab-rehearsal.ts [--collect]
+ *   npx ts-node ab-rehearsal.ts [--collect] [--export markdown|pdf|both|none] [--out-dir <path>]
  *
  * With --collect, also starts the metrics collector in the background.
  *
- * Output can be pasted directly into a status update.
+ * Export behavior:
+ *   - Always writes JSON report
+ *   - Markdown/PDF controlled by --export
  */
 
 import {
@@ -23,7 +25,8 @@ import {
 } from "@solana/spl-token";
 import * as fs from "fs";
 import * as os from "os";
-import { execSync, spawn } from "child_process";
+import * as path from "path";
+import { spawn } from "child_process";
 
 // ─── Config ──────────────────────────────────────────────────────────────
 
@@ -31,6 +34,43 @@ const PFDA3_PROGRAM_ID = new PublicKey("DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsM
 const G3M_PROGRAM_ID = new PublicKey("65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi");
 const RPC_URL = "https://api.devnet.solana.com";
 const SWITCHBOARD_FEED = new PublicKey("BV9mGAy5MJLYWJT5HF74izYKjF9CmL4BqkswfTu9gW2w");
+
+type ExportFormat = "none" | "markdown" | "pdf" | "both";
+
+interface CliOptions {
+  collect: boolean;
+  exportFormat: ExportFormat;
+  outDir: string;
+}
+
+interface RehearsalReport {
+  generatedAt: string;
+  rpcUrl: string;
+  wallet: string;
+  walletBalanceSol: string;
+  programs: {
+    etfA: string;
+    etfB: string;
+  };
+  overallPass: boolean;
+  etfA: {
+    pass: boolean;
+    oracleUsed: boolean;
+    bidPaid: boolean;
+    treasuryDeltaLamports: number;
+    tokensOut: string;
+    cu: Record<string, number | null>;
+    txSigs: Record<string, string>;
+  };
+  etfB: {
+    pass: boolean;
+    driftBps: number | null;
+    driftToken: number | null;
+    needsRebalance: boolean | null;
+    cu: Record<string, number | null>;
+    txSigs: Record<string, string>;
+  };
+}
 
 function loadPayer(): Keypair {
   const path = `${os.homedir()}/.config/solana/id.json`;
@@ -110,6 +150,110 @@ async function waitForSlot(conn: Connection, target: bigint) {
     const s = BigInt(await conn.getSlot("confirmed"));
     if (s >= target) return;
     await new Promise(r => setTimeout(r, 400));
+  }
+}
+
+function parseCli(argv: string[]): CliOptions {
+  let collect = false;
+  let exportFormat: ExportFormat = "markdown";
+  let outDir = path.resolve(__dirname, "../reports");
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--collect") {
+      collect = true;
+      continue;
+    }
+    if (arg === "--out-dir" && i + 1 < argv.length) {
+      outDir = path.resolve(process.cwd(), argv[++i]);
+      continue;
+    }
+    if (arg === "--export" && i + 1 < argv.length) {
+      const v = argv[++i] as ExportFormat;
+      if (v === "none" || v === "markdown" || v === "pdf" || v === "both") {
+        exportFormat = v;
+      } else {
+        throw new Error(`Invalid --export value: ${v}`);
+      }
+      continue;
+    }
+  }
+
+  return { collect, exportFormat, outDir };
+}
+
+function cu(v: number | null | undefined): string {
+  return v == null ? "N/A" : v.toLocaleString();
+}
+
+function buildMarkdown(report: RehearsalReport): string {
+  const lines: string[] = [];
+  lines.push("# Axis A/B Rehearsal Report");
+  lines.push("");
+  lines.push(`- Generated At: ${report.generatedAt}`);
+  lines.push(`- RPC: ${report.rpcUrl}`);
+  lines.push(`- Wallet: ${report.wallet}`);
+  lines.push(`- Wallet Balance: ${report.walletBalanceSol} SOL`);
+  lines.push(`- Overall: ${report.overallPass ? "PASS" : "FAIL"}`);
+  lines.push("");
+  lines.push("## ETF A (PFDA-3)");
+  lines.push("");
+  lines.push(`- Program: \`${report.programs.etfA}\``);
+  lines.push(`- Result: **${report.etfA.pass ? "PASS" : "FAIL"}**`);
+  lines.push(`- Oracle Used: ${report.etfA.oracleUsed ? "YES" : "NO (fallback)"}`);
+  lines.push(`- Bid Paid: ${report.etfA.bidPaid ? "YES" : "NO"}`);
+  lines.push(`- Treasury Delta: ${report.etfA.treasuryDeltaLamports} lamports`);
+  lines.push(`- Tokens Out: ${report.etfA.tokensOut}`);
+  lines.push("");
+  lines.push("| Instruction | CU |");
+  lines.push("|---|---:|");
+  for (const [k, v] of Object.entries(report.etfA.cu)) {
+    lines.push(`| ${k} | ${cu(v)} |`);
+  }
+  lines.push("");
+  lines.push("## ETF B (G3M)");
+  lines.push("");
+  lines.push(`- Program: \`${report.programs.etfB}\``);
+  lines.push(`- Result: **${report.etfB.pass ? "PASS" : "FAIL"}**`);
+  lines.push(`- Max Drift: ${report.etfB.driftBps ?? "N/A"} bps`);
+  lines.push(`- Drift Token Index: ${report.etfB.driftToken ?? "N/A"}`);
+  lines.push(`- Needs Rebalance: ${report.etfB.needsRebalance ?? "N/A"}`);
+  lines.push("");
+  lines.push("| Instruction | CU |");
+  lines.push("|---|---:|");
+  for (const [k, v] of Object.entries(report.etfB.cu)) {
+    lines.push(`| ${k} | ${cu(v)} |`);
+  }
+  lines.push("");
+  lines.push("## Transaction Signatures");
+  lines.push("");
+  lines.push("### ETF A");
+  lines.push("```text");
+  for (const [k, v] of Object.entries(report.etfA.txSigs)) {
+    lines.push(`${k}: ${v}`);
+  }
+  lines.push("```");
+  lines.push("");
+  lines.push("### ETF B");
+  lines.push("```text");
+  for (const [k, v] of Object.entries(report.etfB.txSigs)) {
+    lines.push(`${k}: ${v}`);
+  }
+  lines.push("```");
+  lines.push("");
+  return lines.join("\n");
+}
+
+async function maybeExportPdf(mdPath: string, pdfPath: string): Promise<boolean> {
+  try {
+    // Optional dependency; keep markdown export working even if PDF deps are absent.
+    const { mdToPdf } = require("md-to-pdf") as {
+      mdToPdf: (input: { path: string }, options: { dest: string }) => Promise<unknown>;
+    };
+    await mdToPdf({ path: mdPath }, { dest: pdfPath });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -442,6 +586,7 @@ async function runEtfB(conn: Connection, payer: Keypair): Promise<EtfBResult> {
 // ─── Main ────────────────────────────────────────────────────────────────
 
 async function main() {
+  const opts = parseCli(process.argv.slice(2));
   const conn = new Connection(RPC_URL, "confirmed");
   const payer = loadPayer();
 
@@ -455,7 +600,7 @@ async function main() {
   console.log(`Time    : ${new Date().toISOString()}\n`);
 
   // Optionally start collector
-  if (process.argv.includes("--collect")) {
+  if (opts.collect) {
     console.log("Starting metrics collector in background...");
     const child = spawn("npx", ["ts-node", "collect-ab-metrics.ts"], {
       cwd: __dirname, detached: true, stdio: "ignore",
@@ -517,6 +662,57 @@ async function main() {
   console.log("  ETF B:");
   for (const [k, v] of Object.entries(etfB.txSigs)) {
     console.log(`    ${k}: ${v}`);
+  }
+
+  const report: RehearsalReport = {
+    generatedAt: new Date().toISOString(),
+    rpcUrl: RPC_URL,
+    wallet: payer.publicKey.toBase58(),
+    walletBalanceSol: (bal / LAMPORTS_PER_SOL).toFixed(2),
+    programs: {
+      etfA: PFDA3_PROGRAM_ID.toBase58(),
+      etfB: G3M_PROGRAM_ID.toBase58(),
+    },
+    overallPass: overall,
+    etfA: {
+      pass: etfA.pass,
+      oracleUsed: etfA.oracleUsed,
+      bidPaid: etfA.bidPaid,
+      treasuryDeltaLamports: etfA.treasuryDelta,
+      tokensOut: etfA.tokensOut.toString(),
+      cu: etfA.cu,
+      txSigs: etfA.txSigs,
+    },
+    etfB: {
+      pass: etfB.pass,
+      driftBps: etfB.driftBps,
+      driftToken: etfB.driftToken,
+      needsRebalance: etfB.needsRebalance,
+      cu: etfB.cu,
+      txSigs: etfB.txSigs,
+    },
+  };
+
+  fs.mkdirSync(opts.outDir, { recursive: true });
+  const stamp = report.generatedAt.replace(/[:.]/g, "-");
+  const jsonPath = path.join(opts.outDir, `ab-rehearsal-${stamp}.json`);
+  const mdPath = path.join(opts.outDir, `ab-rehearsal-${stamp}.md`);
+  const pdfPath = path.join(opts.outDir, `ab-rehearsal-${stamp}.pdf`);
+  fs.writeFileSync(jsonPath, JSON.stringify(report, null, 2), "utf-8");
+  console.log(`\nSaved JSON report: ${jsonPath}`);
+
+  if (opts.exportFormat === "markdown" || opts.exportFormat === "both" || opts.exportFormat === "pdf") {
+    fs.writeFileSync(mdPath, buildMarkdown(report), "utf-8");
+    console.log(`Saved Markdown report: ${mdPath}`);
+  }
+
+  if (opts.exportFormat === "pdf" || opts.exportFormat === "both") {
+    const pdfOk = await maybeExportPdf(mdPath, pdfPath);
+    if (pdfOk) {
+      console.log(`Saved PDF report: ${pdfPath}`);
+    } else {
+      console.log("PDF export skipped (install `md-to-pdf` in test/ab to enable).");
+    }
   }
 
   if (!overall) process.exit(1);

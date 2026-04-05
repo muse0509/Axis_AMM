@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   rust-and-typescript:
-    name: Rust Tests, SBF Builds, and TS Checks
+    name: Rust + TypeScript Checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -20,57 +20,22 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: "22"
+          bun-version: "1.3.6"
 
       - name: Set up Rust
-        run: |
-          rustup update stable
-          rustup default stable
+        run: bash ci/setup-rust.sh
 
       - name: Install Solana CLI
-        run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          solana --version
-          cargo-build-sbf --version
+        run: bash ci/install-solana.sh
 
-      - name: Run Rust unit tests
-        run: |
-          cargo test --manifest-path contracts/pfda-amm/Cargo.toml
-          cargo test --manifest-path contracts/pfda-amm-3/Cargo.toml
-          cargo test --manifest-path contracts/axis-g3m/Cargo.toml
-          cargo test --manifest-path contracts/axis-vault/Cargo.toml
-          cargo test --manifest-path solana-tfmm-rs/Cargo.toml
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
 
-      - name: Build Solana programs
-        run: |
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          cargo build-sbf --manifest-path contracts/pfda-amm/Cargo.toml
-          cargo build-sbf --manifest-path contracts/pfda-amm-3/Cargo.toml
-          cargo build-sbf --manifest-path contracts/axis-g3m/Cargo.toml
-          cargo build-sbf --manifest-path contracts/axis-vault/Cargo.toml
-
-      - name: Install TypeScript client dependencies
-        run: |
-          npm ci --prefix pfda-amm/client
-          npm ci --prefix contracts/pfda-amm-3/client
-          npm ci --prefix axis-g3m/client
-          npm ci --prefix axis-vault/client
-          npm ci --prefix scripts
-          npm ci --prefix benchmark
-
-      - name: Type-check TypeScript clients and scripts
-        run: |
-          npx --prefix pfda-amm/client tsc --noEmit -p pfda-amm/client/tsconfig.json
-          npx --prefix contracts/pfda-amm-3/client tsc --noEmit -p contracts/pfda-amm-3/client/tsconfig.json
-          npx --prefix axis-g3m/client tsc --noEmit -p axis-g3m/client/tsconfig.json
-          npx --prefix axis-vault/client tsc --noEmit -p axis-vault/client/tsconfig.json
-          npx --prefix scripts tsc --noEmit -p scripts/tsconfig.json
-          npx --prefix benchmark tsc --noEmit -p benchmark/tsconfig.json
+      - name: Run Rust + TypeScript pipeline
+        run: bash ci/job-rust-and-typescript.sh
 
   local-e2e:
     name: Local Validator E2E
@@ -81,71 +46,22 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: "22"
+          bun-version: "1.3.6"
 
       - name: Set up Rust
-        run: |
-          rustup update stable
-          rustup default stable
+        run: bash ci/setup-rust.sh
 
       - name: Install Solana CLI
-        run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          solana --version
-          cargo-build-sbf --version
+        run: bash ci/install-solana.sh
 
-      - name: Build local validator programs
-        run: |
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          cargo build-sbf --manifest-path contracts/pfda-amm-3/Cargo.toml
-          cargo build-sbf --manifest-path contracts/axis-g3m/Cargo.toml
-          cargo build-sbf --manifest-path contracts/axis-vault/Cargo.toml
-
-      - name: Install e2e dependencies
-        run: |
-          npm ci --prefix contracts/pfda-amm-3/client
-          npm ci --prefix axis-g3m/client
-          npm ci --prefix axis-vault/client
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
 
       - name: Run local validator e2e suites
-        run: |
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-
-          mkdir -p "$HOME/.config/solana"
-          solana-keygen new --no-bip39-passphrase --silent -o "$HOME/.config/solana/id.json"
-
-          solana-test-validator \
-            --reset \
-            --ledger /tmp/solana-ci-ledger \
-            --bpf-program DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf contracts/pfda-amm-3/target/deploy/pfda_amm_3.so \
-            --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi contracts/axis-g3m/target/deploy/axis_g3m.so \
-            --bpf-program DeeUnCHcnPG8arbjGTLhTKeDhpPUBper3TDrpFPHnCwy contracts/axis-vault/target/deploy/axis_vault.so \
-            > /tmp/solana-test-validator.log 2>&1 &
-          validator_pid=$!
-
-          cleanup() {
-            kill "$validator_pid" || true
-          }
-          trap cleanup EXIT
-
-          export SOLANA_URL=http://localhost:8899
-          solana config set --url localhost
-          until solana -u localhost cluster-version >/dev/null 2>&1; do
-            sleep 1
-          done
-
-          solana -u localhost airdrop 2 || echo "Airdrop unavailable on this CLI/runtime; continuing with existing local balance."
-
-          RPC_URL=http://localhost:8899 WINDOW_SLOTS=10 \
-            npx --prefix contracts/pfda-amm-3/client ts-node \
-            contracts/pfda-amm-3/client/e2e.ts
-          npx --prefix axis-g3m/client ts-node axis-g3m/client/e2e.ts
-          RPC_URL=http://localhost:8899 npx --prefix axis-vault/client ts-node axis-vault/client/e2e.ts
+        run: bash ci/job-local-e2e.sh
 
       - name: Dump validator log on failure
         if: failure()
