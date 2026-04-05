@@ -1,0 +1,47 @@
+name: Reusable Rust
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: bash ci/setup-rust.sh
+
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            contracts/pfda-amm/target
+            contracts/pfda-amm-3/target
+            contracts/axis-g3m/target
+            contracts/axis-vault/target
+            solana-tfmm-rs/target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - name: Cache Solana CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/solana/install
+          key: solana-cli-${{ runner.os }}-stable-v1
+
+      - name: Install Solana CLI
+        run: bash ci/install-solana.sh
+
+      - name: Run Rust pipeline
+        run: bash ci/job-rust.sh

@@ -1,0 +1,8 @@
+{
+  "name": "axis-vault-client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "e2e:local": "RPC_URL=http://localhost:8899 bun axis-vault.local.e2e.ts"
+  }
+}

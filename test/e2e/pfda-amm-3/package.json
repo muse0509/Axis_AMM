@@ -1,0 +1,12 @@
+{
+  "name": "pfda-amm-3-client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "e2e:local": "RPC_URL=http://localhost:8899 WINDOW_SLOTS=10 bun pfda-amm-3.local.e2e.ts",
+    "e2e:oracle-bid:devnet": "bun pfda-amm-3.oracle-bid.devnet.e2e.ts",
+    "test:o1-proof": "bun pfda-amm-3.o1-proof.test.ts",
+    "test:imbalanced": "bun pfda-amm-3.imbalanced.test.ts",
+    "test:multiuser": "bun pfda-amm-3.multiuser.test.ts"
+  }
+}

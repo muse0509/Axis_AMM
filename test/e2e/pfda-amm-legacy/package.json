@@ -1,0 +1,11 @@
+{
+  "name": "pfda-amm-client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "e2e:local": "bun pfda-amm-legacy.local.e2e.ts",
+    "test:oracle": "bun pfda-amm-legacy.oracle.test.ts",
+    "test:jito-bid": "bun pfda-amm-legacy.jito-bid.test.ts",
+    "bench:o1": "bun pfda-amm-legacy.o1-benchmark.ts"
+  }
+}
