@@ -46,9 +46,9 @@ import * as os from "os";
 
 // ─── Program IDs ──────────────────────────────────────────────────────────
 
-const PFDA_PROGRAM_ID = new PublicKey("CSBgQGeBTiAu4a9Kgoas2GyR8wbHg5jxctQjq3AenKk");
-const G3M_PROGRAM_ID = new PublicKey("65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi");
-const RPC_URL = "http://localhost:8899";
+const PFDA_PROGRAM_ID = new PublicKey(process.env.PFDA_PROGRAM_ID ?? "5BKDTDQdX7vFdDooVXZeKicu7S3yX2JY5e3rmASib5pY");
+const G3M_PROGRAM_ID = new PublicKey(process.env.G3M_PROGRAM_ID ?? "65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi");
+const RPC_URL = process.env.RPC_URL ?? "http://localhost:8899";
 
 // ─── Shared Config ────────────────────────────────────────────────────────
 

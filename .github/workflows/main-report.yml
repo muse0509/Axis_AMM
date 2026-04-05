@@ -1,16 +1,23 @@
-name: E2E Devnet (Manual)
+name: Main AB Report
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "reports/**"
+
+concurrency:
+  group: main-ab-report-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  devnet-e2e:
-    name: Devnet E2E Suites
+  update-ab-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -28,9 +35,6 @@ jobs:
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: |
             bun-${{ runner.os }}-
-
-      - name: Set up Rust
-        run: bash ci/setup-rust.sh
 
       - name: Cache Solana CLI
         uses: actions/cache@v4
@@ -59,32 +63,17 @@ jobs:
       - name: Set devnet RPC
         run: solana config set --url devnet
 
-      - name: Run Axis G3M devnet e2e
-        run: bun run e2e:axis-g3m:devnet
-
-      - name: Run PFDA AMM 3 oracle-bid devnet e2e
-        run: bun run e2e:pfda-amm-3:oracle-bid:devnet
-
-      - name: Run PFDA AMM 3 O(1) proof test
-        run: bun run test:pfda-amm-3:o1-proof
-
-      - name: Run PFDA AMM 3 imbalanced test
-        run: bun run test:pfda-amm-3:imbalanced
-
-      - name: Run PFDA AMM 3 multiuser test
-        run: bun run test:pfda-amm-3:multiuser
-
-      - name: Run PFDA AMM legacy oracle test
-        run: bun run test:pfda-amm-legacy:oracle
-
-      - name: Run PFDA AMM legacy Jito bid test
-        run: bun run test:pfda-amm-legacy:jito-bid
-
-      - name: Run AB rehearsal and refresh markdown report
+      - name: Generate AB markdown report
         run: bash ci/update-ab-report.sh
 
-      - name: Upload AB report artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ab-rehearsal-report
-          path: reports/ab
+      - name: Commit and push report updates
+        run: |
+          if git diff --quiet -- reports/ab; then
+            echo "No report updates to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/ab
+          git commit -m "chore(reports): refresh AB rehearsal markdown"
+          git push

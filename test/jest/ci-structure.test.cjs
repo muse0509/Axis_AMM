@@ -20,22 +20,26 @@ describe("CI Structure", () => {
   test("entry workflow calls reusable workflows to avoid duplicated triggers", () => {
     const entryWorkflow = readFile(".github/workflows/ci.yml");
 
-    expect(entryWorkflow).toContain(".github/workflows/reusable-rust-and-typescript.yml");
+    expect(entryWorkflow).toContain(".github/workflows/reusable-rust.yml");
+    expect(entryWorkflow).toContain(".github/workflows/reusable-typescript.yml");
     expect(entryWorkflow).toContain(".github/workflows/reusable-e2e-local.yml");
     expect(entryWorkflow).toContain("cancel-in-progress: true");
   });
 
   test("reusable workflows delegate logic to scripts and step-based e2e suites", () => {
-    const rustTsWorkflow = readFile(".github/workflows/reusable-rust-and-typescript.yml");
+    const rustWorkflow = readFile(".github/workflows/reusable-rust.yml");
+    const tsWorkflow = readFile(".github/workflows/reusable-typescript.yml");
     const localE2eWorkflow = readFile(".github/workflows/reusable-e2e-local.yml");
 
-    expect(rustTsWorkflow).toContain("bash ci/job-rust-and-typescript.sh");
+    expect(rustWorkflow).toContain("bash ci/job-rust.sh");
+    expect(tsWorkflow).toContain("bash ci/job-typescript.sh");
 
     expect(localE2eWorkflow).toContain("bash ci/e2e-local-prepare.sh");
     expect(localE2eWorkflow).toContain("bun run e2e:pfda-amm-legacy:local");
     expect(localE2eWorkflow).toContain("bun run e2e:pfda-amm-3:local");
     expect(localE2eWorkflow).toContain("bun run e2e:axis-g3m:local");
     expect(localE2eWorkflow).toContain("bun run e2e:axis-vault:local");
+    expect(localE2eWorkflow).toContain("bun run bench:ab");
     expect(localE2eWorkflow).toContain("bash ci/e2e-local-cleanup.sh");
   });
 
@@ -49,14 +53,19 @@ describe("CI Structure", () => {
       "ci/ts-typecheck.sh",
       "ci/ts-lint.sh",
       "ci/jest.sh",
+      "ci/job-rust.sh",
+      "ci/job-typescript.sh",
       "ci/job-rust-and-typescript.sh",
       "ci/job-local-e2e.sh",
       "ci/job-devnet-e2e.sh",
       "ci/e2e-local-prepare.sh",
       "ci/e2e-local-cleanup.sh",
-      ".github/workflows/reusable-rust-and-typescript.yml",
+      "ci/update-ab-report.sh",
+      ".github/workflows/reusable-rust.yml",
+      ".github/workflows/reusable-typescript.yml",
       ".github/workflows/reusable-e2e-local.yml",
       ".github/workflows/e2e-devnet.yml",
+      ".github/workflows/main-report.yml",
     ];
 
     for (const script of requiredScripts) {

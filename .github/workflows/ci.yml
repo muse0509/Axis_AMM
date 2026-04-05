@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "reports/**"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -14,11 +16,17 @@ permissions:
   contents: read
 
 jobs:
-  rust-and-typescript:
-    name: Rust + TypeScript Checks
-    uses: ./.github/workflows/reusable-rust-and-typescript.yml
+  rust:
+    name: Rust Checks
+    uses: ./.github/workflows/reusable-rust.yml
 
-  local-e2e:
+  typescript:
+    name: TypeScript Checks
+    uses: ./.github/workflows/reusable-typescript.yml
+
+  local-e2e-and-benchmark:
     name: Local Validator E2E
-    needs: rust-and-typescript
+    needs:
+      - rust
+      - typescript
     uses: ./.github/workflows/reusable-e2e-local.yml
