@@ -40,22 +40,24 @@ jobs:
 
       - name: Run Rust unit tests
         run: |
-          cargo test --manifest-path pfda-amm/Cargo.toml
-          cargo test --manifest-path axis-g3m/Cargo.toml
-          cargo test --manifest-path axis-vault/Cargo.toml
+          cargo test --manifest-path contracts/pfda-amm/Cargo.toml
+          cargo test --manifest-path contracts/pfda-amm-3/Cargo.toml
+          cargo test --manifest-path contracts/axis-g3m/Cargo.toml
+          cargo test --manifest-path contracts/axis-vault/Cargo.toml
           cargo test --manifest-path solana-tfmm-rs/Cargo.toml
 
       - name: Build Solana programs
         run: |
           export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          cargo build-sbf --manifest-path pfda-amm/Cargo.toml
-          cargo build-sbf --manifest-path axis-g3m/Cargo.toml
-          cargo build-sbf --manifest-path axis-vault/Cargo.toml
+          cargo build-sbf --manifest-path contracts/pfda-amm/Cargo.toml
+          cargo build-sbf --manifest-path contracts/pfda-amm-3/Cargo.toml
+          cargo build-sbf --manifest-path contracts/axis-g3m/Cargo.toml
+          cargo build-sbf --manifest-path contracts/axis-vault/Cargo.toml
 
       - name: Install TypeScript client dependencies
         run: |
           npm ci --prefix pfda-amm/client
-          npm ci --prefix pfda-amm/programs/pfda-amm-3/client
+          npm ci --prefix contracts/pfda-amm-3/client
           npm ci --prefix axis-g3m/client
           npm ci --prefix axis-vault/client
           npm ci --prefix scripts
@@ -64,7 +66,7 @@ jobs:
       - name: Type-check TypeScript clients and scripts
         run: |
           npx --prefix pfda-amm/client tsc --noEmit -p pfda-amm/client/tsconfig.json
-          npx --prefix pfda-amm/programs/pfda-amm-3/client tsc --noEmit -p pfda-amm/programs/pfda-amm-3/client/tsconfig.json
+          npx --prefix contracts/pfda-amm-3/client tsc --noEmit -p contracts/pfda-amm-3/client/tsconfig.json
           npx --prefix axis-g3m/client tsc --noEmit -p axis-g3m/client/tsconfig.json
           npx --prefix axis-vault/client tsc --noEmit -p axis-vault/client/tsconfig.json
           npx --prefix scripts tsc --noEmit -p scripts/tsconfig.json
@@ -100,13 +102,13 @@ jobs:
       - name: Build local validator programs
         run: |
           export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          cargo build-sbf --manifest-path pfda-amm/Cargo.toml
-          cargo build-sbf --manifest-path axis-g3m/Cargo.toml
-          cargo build-sbf --manifest-path axis-vault/Cargo.toml
+          cargo build-sbf --manifest-path contracts/pfda-amm-3/Cargo.toml
+          cargo build-sbf --manifest-path contracts/axis-g3m/Cargo.toml
+          cargo build-sbf --manifest-path contracts/axis-vault/Cargo.toml
 
       - name: Install e2e dependencies
         run: |
-          npm ci --prefix pfda-amm/programs/pfda-amm-3/client
+          npm ci --prefix contracts/pfda-amm-3/client
           npm ci --prefix axis-g3m/client
           npm ci --prefix axis-vault/client
 
@@ -120,9 +122,9 @@ jobs:
           solana-test-validator \
             --reset \
             --ledger /tmp/solana-ci-ledger \
-            --bpf-program DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf pfda-amm/target/deploy/pfda_amm_3.so \
-            --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi axis-g3m/target/deploy/axis_g3m.so \
-            --bpf-program DeeUnCHcnPG8arbjGTLhTKeDhpPUBper3TDrpFPHnCwy axis-vault/target/deploy/axis_vault.so \
+            --bpf-program DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf contracts/pfda-amm-3/target/deploy/pfda_amm_3.so \
+            --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi contracts/axis-g3m/target/deploy/axis_g3m.so \
+            --bpf-program DeeUnCHcnPG8arbjGTLhTKeDhpPUBper3TDrpFPHnCwy contracts/axis-vault/target/deploy/axis_vault.so \
             > /tmp/solana-test-validator.log 2>&1 &
           validator_pid=$!
 
@@ -137,11 +139,11 @@ jobs:
             sleep 1
           done
 
-          solana -u localhost airdrop 100
+          solana -u localhost airdrop 2 || echo "Airdrop unavailable on this CLI/runtime; continuing with existing local balance."
 
           RPC_URL=http://localhost:8899 WINDOW_SLOTS=10 \
-            npx --prefix pfda-amm/programs/pfda-amm-3/client ts-node \
-            pfda-amm/programs/pfda-amm-3/client/e2e.ts
+            npx --prefix contracts/pfda-amm-3/client ts-node \
+            contracts/pfda-amm-3/client/e2e.ts
           npx --prefix axis-g3m/client ts-node axis-g3m/client/e2e.ts
           RPC_URL=http://localhost:8899 npx --prefix axis-vault/client ts-node axis-vault/client/e2e.ts
 

@@ -6,7 +6,7 @@
  * It is retained for CU regression testing of the original AMM design.
  *
  * For the canonical A/B test, use:
- *   ETF A: pfda-amm/programs/pfda-amm-3/client/oracle-bid-e2e.ts
+ *   ETF A: contracts/pfda-amm-3/client/oracle-bid-e2e.ts
  *   ETF B: axis-g3m/client/e2e-devnet.ts
  *
  * Deploys and benchmarks on a local validator:
@@ -16,8 +16,8 @@
  * Prerequisites:
  *   solana-test-validator running with both programs loaded:
  *   solana-test-validator \
- *     --bpf-program CSBgQGeBTiAu4a9Kgoas2GyR8wbHg5jxctQjq3AenKk ../pfda-amm/target/deploy/pfda_amm.so \
- *     --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi ../axis-g3m/target/deploy/axis_g3m.so \
+ *     --bpf-program CSBgQGeBTiAu4a9Kgoas2GyR8wbHg5jxctQjq3AenKk ../contracts/pfda-amm/target/deploy/pfda_amm.so \
+ *     --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi ../contracts/axis-g3m/target/deploy/axis_g3m.so \
  *     --reset
  */
 

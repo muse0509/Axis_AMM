@@ -1,3 +1,0 @@
-[workspace]
-members = ["programs/pfda-amm", "programs/pfda-amm-3"]
-resolver = "2"

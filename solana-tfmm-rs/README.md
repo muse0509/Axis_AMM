@@ -66,22 +66,23 @@ As the pool's weight transitions, the clearing price monotonically increases, pr
 | 2 | 56.27% | 1.488 | 261,821 |
 | 3 | 61.13% | 1.737 | 267,834 |
 
-*Smart contract and TS benchmark code available in `pfda-amm/`.*
+*Smart contract code is in `contracts/pfda-amm/`; TS benchmark clients are in `pfda-amm/client/`.*
 
 ---
 
 ## 🚀 Repository Structure & Usage
 
-* `pfda-amm/`: The core Solana smart contract (Rust/Pinocchio) and TypeScript E2E clients.
+* `contracts/pfda-amm/`: The core Solana smart contract (Rust/Pinocchio).
+* `pfda-amm/client/`: TypeScript E2E and benchmarking clients for the legacy 2-token PFDA path.
 * `solana-tfmm-rs/`: The Python/Rust simulation engine for LVR calculations using Helius RPC data.
 
 **To run the on-chain benchmarks locally:**
 ```bash
-cd pfda-amm
+cd contracts/pfda-amm
 cargo build-sbf
 solana-test-validator --bpf-program 5BKDTDQdX7vFdDooVXZeKicu7S3yX2JY5e3rmASib5pY target/deploy/pfda_amm.so
 
 # In another terminal:
-cd client
+cd ../../pfda-amm/client
 npm install
 npm run bench

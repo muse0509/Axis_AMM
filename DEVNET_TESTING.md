@@ -32,7 +32,7 @@ Upgrade authority: `6t4B1TVgSjnAM9h5MpahLhGc9MtWFTGmcaPsy9JGskoV`
 The canonical test path for ETF A uses the **3-token PFDA** program with oracle bounding and bid/treasury payment.
 
 ```bash
-cd pfda-amm/programs/pfda-amm-3/client
+cd contracts/pfda-amm-3/client
 npm install
 npx ts-node oracle-bid-e2e.ts   # Full canonical path: oracle + bid + treasury
 npx ts-node e2e.ts               # Basic path without oracle/bid (faster, for quick checks)
@@ -209,8 +209,8 @@ Compares both ETFs side by side on a local test validator.
 # Terminal 1: Start validator with all programs
 cd SolanaAMM
 solana-test-validator \
-  --bpf-program DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf pfda-amm/target/deploy/pfda_amm_3.so \
-  --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi axis-g3m/target/deploy/axis_g3m.so \
+  --bpf-program DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf contracts/pfda-amm-3/target/deploy/pfda_amm_3.so \
+  --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi contracts/axis-g3m/target/deploy/axis_g3m.so \
   --reset
 
 # Terminal 2: Run benchmark
@@ -228,18 +228,22 @@ npm run bench
 
 ```bash
 # Build all programs
-cd pfda-amm && cargo build-sbf
-cd ../axis-g3m && cargo build-sbf
-cd ../axis-vault && cargo build-sbf
+cargo build-sbf --manifest-path contracts/pfda-amm/Cargo.toml
+cargo build-sbf --manifest-path contracts/pfda-amm-3/Cargo.toml
+cargo build-sbf --manifest-path contracts/axis-g3m/Cargo.toml
+cargo build-sbf --manifest-path contracts/axis-vault/Cargo.toml
 
 # Run all unit tests
-cd ../pfda-amm && cargo test
-cd ../axis-g3m && cargo test
+cargo test --manifest-path contracts/pfda-amm/Cargo.toml
+cargo test --manifest-path contracts/pfda-amm-3/Cargo.toml
+cargo test --manifest-path contracts/axis-g3m/Cargo.toml
+cargo test --manifest-path contracts/axis-vault/Cargo.toml
 
 # Binaries are at:
-#   pfda-amm/target/deploy/pfda_amm.so
-#   pfda-amm/target/deploy/pfda_amm_3.so
-#   axis-g3m/target/deploy/axis_g3m.so
+#   contracts/pfda-amm/target/deploy/pfda_amm.so
+#   contracts/pfda-amm-3/target/deploy/pfda_amm_3.so
+#   contracts/axis-g3m/target/deploy/axis_g3m.so
+#   contracts/axis-vault/target/deploy/axis_vault.so
 ```
 
 ### Deploy your own copy
@@ -250,8 +254,8 @@ solana-keygen new --outfile my-pfda3.json --no-bip39-passphrase
 solana-keygen new --outfile my-g3m.json --no-bip39-passphrase
 
 # Deploy (requires ~1 SOL per program)
-solana program deploy pfda-amm/target/deploy/pfda_amm_3.so --program-id my-pfda3.json
-solana program deploy axis-g3m/target/deploy/axis_g3m.so --program-id my-g3m.json
+solana program deploy contracts/pfda-amm-3/target/deploy/pfda_amm_3.so --program-id my-pfda3.json
+solana program deploy contracts/axis-g3m/target/deploy/axis_g3m.so --program-id my-g3m.json
 
 # Update PROGRAM_ID in the client scripts to match your new IDs
 ```
@@ -262,36 +266,19 @@ solana program deploy axis-g3m/target/deploy/axis_g3m.so --program-id my-g3m.jso
 
 ```
 SolanaAMM/
-├── pfda-amm/                         # ETF A programs
-│   ├── programs/
-│   │   ├── pfda-amm/                 # Legacy: 2-token PFDA (regression tests only)
-│   │   │   └── src/
-│   │   │       ├── oracle.rs         # Switchboard price feed reader
-│   │   │       └── jito.rs           # Jito auction bid enforcement
-│   │   │
-│   │   └── pfda-amm-3/              # ★ Canonical ETF A: 3-token PFDA
-│   │       └── src/
-│   │           ├── lib.rs            # Entrypoint (6 instructions)
-│   │           ├── instructions/     # InitPool, SwapRequest, ClearBatch, Claim, AddLiquidity, WithdrawFees
-│   │           ├── state/            # PoolState3, BatchQueue3, UserOrderTicket3, ClearedBatchHistory3
-│   │           ├── oracle.rs         # Switchboard oracle (ported from 2-token)
-│   │           └── jito.rs           # Jito bid/treasury (ported from 2-token)
-│   │
-│   └── client/                       # Legacy 2-token e2e + oracle test
-│
-├── axis-g3m/                         # ★ Current ETF B rehearsal: 5-token G3M
-│   ├── programs/axis-g3m/
+├── contracts/                        # All on-chain programs
+│   ├── pfda-amm/                     # Legacy: 2-token PFDA
 │   │   └── src/
-│   │       ├── instructions/         # InitializePool, Swap, CheckDrift, Rebalance
-│   │       ├── state/pool_state.rs   # G3mPoolState (drift computation, invariant k)
-│   │       ├── math/fp64.rs          # G3M invariant + swap math
-│   │       ├── jupiter.rs            # Vault balance reader for keeper rebalance
-│   │       └── error.rs
-│   └── client/                       # e2e tests (local + devnet)
-│
-├── axis-vault/                        # ETF token lifecycle
-│   └── programs/axis-vault/src/
-│
+│   ├── pfda-amm-3/                   # Canonical ETF A: 3-token PFDA
+│   │   ├── src/
+│   │   └── client/
+│   ├── axis-g3m/                     # Current ETF B rehearsal: 5-token G3M
+│   │   └── src/
+│   └── axis-vault/                   # ETF token lifecycle
+│       └── src/
+├── pfda-amm/                         # Legacy 2-token TS regression clients
+├── axis-g3m/                         # ETF B TS clients
+├── axis-vault/                       # Vault TS clients
 ├── scripts/                          # Metrics collector, rehearsal, Switchboard setup
 ├── benchmark/                        # A/B CU comparison
 └── DEVNET_TESTING.md                 # This file
