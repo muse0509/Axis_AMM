@@ -39,6 +39,10 @@ pub enum G3mError {
     OwnerMismatch = 7016,
     /// Pool mismatch
     PoolMismatch = 7017,
+    /// Post-rebalance per-token weight still exceeds drift threshold
+    PerTokenDriftExceeded = 7018,
+    /// Single-token reserve change exceeds maximum (attestation mode)
+    ReserveChangeExceeded = 7019,
 }
 
 impl From<G3mError> for ProgramError {

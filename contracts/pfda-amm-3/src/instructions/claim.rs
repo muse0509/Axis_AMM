@@ -8,13 +8,14 @@ use pinocchio::{
 use pinocchio_token::instructions::Transfer;
 
 use crate::error::Pfda3Error;
+use crate::security::{verify_token_account_mint, verify_vault};
 use crate::state::{load, load_mut, ClearedBatchHistory3, PoolState3, UserOrderTicket3};
 
 /// Claim3 — O(1) proportional withdrawal for 3-token pool.
 ///
 /// Accounts:
 /// 0: [signer]    user
-/// 1: []           pool_state PDA
+/// 1: [writable]   pool_state PDA
 /// 2: []           history PDA
 /// 3: [writable]   ticket PDA
 /// 4: [writable]   vault_0
@@ -37,16 +38,25 @@ pub fn process_claim_3(program_id: &Pubkey, accounts: &[AccountInfo]) -> Program
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Load pool for PDA signer seeds
-    let (pool_key, pool_bump, token_mints) = {
+    // Load pool for PDA signer seeds, vaults, and mints
+    let (pool_key, pool_bump, token_mints, vaults) = {
         let data = pool_ai.try_borrow_data()?;
         let pool = unsafe { load::<PoolState3>(&data) }
             .ok_or(ProgramError::InvalidAccountData)?;
         if !pool.is_initialized() {
             return Err(Pfda3Error::InvalidDiscriminator.into());
         }
-        (*pool_ai.key(), pool.bump, pool.token_mints)
+        (*pool_ai.key(), pool.bump, pool.token_mints, pool.vaults)
     };
+
+    // Validate vault accounts match pool's configured vaults
+    let vault_accounts = [vault0, vault1, vault2];
+    for i in 0..3 {
+        if vault_accounts[i].key().as_ref() != &vaults[i] {
+            return Err(Pfda3Error::VaultMismatch.into());
+        }
+        verify_vault(vault_accounts[i], &token_mints[i], pool_key.as_ref().try_into().unwrap())?;
+    }
 
     // Load history
     let (batch_id, clearing_prices, total_in, total_out, fee_bps) = {
@@ -94,13 +104,17 @@ pub fn process_claim_3(program_id: &Pubkey, accounts: &[AccountInfo]) -> Program
         (found_idx, found_amount, ticket.out_token_idx, ticket.min_amount_out)
     };
 
-    // Compute output amount using clearing prices.
-    // The clearing prices are Q32.32 prices of each token in numeraire terms.
-    // Exchange rate from token in → token out:
-    //   rate = clearing_price[in] / clearing_price[out]
-    // amount_out = amount_in * rate (already includes fee from clearing)
     let in_i = in_idx as usize;
     let out_i = out_idx as usize;
+
+    // Bounds check: both indices must be < 3 (panic handler is UB in no_std)
+    if in_i >= 3 || out_i >= 3 {
+        return Err(Pfda3Error::InvalidTokenIndex.into());
+    }
+
+    // Validate user's output token account mint matches the expected token
+    let user_accounts = [user_tok0, user_tok1, user_tok2];
+    verify_token_account_mint(user_accounts[out_i], &token_mints[out_i])?;
 
     if total_in[in_i] == 0 {
         let mut data = ticket_ai.try_borrow_mut_data()?;
@@ -130,9 +144,6 @@ pub fn process_claim_3(program_id: &Pubkey, accounts: &[AccountInfo]) -> Program
     }
 
     // Transfer from vault to user
-    let vault_accounts = [vault0, vault1, vault2];
-    let user_accounts = [user_tok0, user_tok1, user_tok2];
-
     let pool_bump_seed = [pool_bump];
     let pool_signer = [
         Seed::from(b"pool3".as_ref()),
@@ -150,6 +161,39 @@ pub fn process_claim_3(program_id: &Pubkey, accounts: &[AccountInfo]) -> Program
             amount: amount_out,
         }
         .invoke_signed(&[Signer::from(&pool_signer)])?;
+    }
+
+    // Update pool reserves to reflect the outflow + invariant floor check
+    if amount_out > 0 {
+        let mut data = pool_ai.try_borrow_mut_data()?;
+        let pool = unsafe { load_mut::<PoolState3>(&mut data) }
+            .ok_or(ProgramError::InvalidAccountData)?;
+
+        // Snapshot reserve product before outflow (checked — overflow is an error)
+        let pre_product: u128 = (pool.reserves[0].max(1) as u128)
+            .checked_mul(pool.reserves[1].max(1) as u128)
+            .and_then(|x| x.checked_mul(pool.reserves[2].max(1) as u128))
+            .ok_or(ProgramError::from(Pfda3Error::Overflow))?;
+
+        pool.reserves[out_i] = pool.reserves[out_i]
+            .checked_sub(amount_out)
+            .ok_or(Pfda3Error::Overflow)?;
+
+        // Post-claim invariant floor: reserve product must not drop more
+        // than 1% below pre-claim product. This catches pathological
+        // concentrated withdrawals that could drain a single token.
+        let post_product: u128 = (pool.reserves[0].max(1) as u128)
+            .checked_mul(pool.reserves[1].max(1) as u128)
+            .and_then(|x| x.checked_mul(pool.reserves[2].max(1) as u128))
+            .ok_or(ProgramError::from(Pfda3Error::Overflow))?;
+
+        let min_product = pre_product
+            .checked_mul(99)
+            .ok_or(ProgramError::from(Pfda3Error::Overflow))?
+            / 100;
+        if post_product < min_product {
+            return Err(Pfda3Error::InvariantViolation.into());
+        }
     }
 
     // Mark claimed
