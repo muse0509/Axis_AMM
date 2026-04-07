@@ -1,0 +1,66 @@
+name: LiteSVM Jupiter CPI Tests
+
+on:
+  push:
+    branches: [feat/jupiter-cpi]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'contracts/axis-g3m/**'
+
+jobs:
+  litesvm-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.86.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/axis-g3m/target
+          key: litesvm-${{ hashFiles('contracts/axis-g3m/Cargo.lock') }}
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Build axis-g3m SBF
+        run: |
+          cd contracts/axis-g3m
+          cargo build-sbf
+
+      - name: Dump Jupiter V6 from mainnet
+        run: |
+          mkdir -p contracts/axis-g3m/fixtures
+          solana program dump \
+            -u https://api.mainnet-beta.solana.com \
+            JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 \
+            contracts/axis-g3m/fixtures/jupiter_v6.so
+
+      - name: Run LiteSVM unit tests (no network)
+        run: |
+          cd contracts/axis-g3m
+          cargo test --test jupiter_cpi \
+            test_g3m_basic_lifecycle \
+            test_jupiter_program_loads \
+            -- --nocapture
+
+      - name: Run LiteSVM mainnet fork test
+        env:
+          MAINNET_RPC_URL: https://api.mainnet-beta.solana.com
+        run: |
+          cd contracts/axis-g3m
+          cargo test --test jupiter_cpi \
+            test_jupiter_rebalance_mainnet_fork \
+            -- --nocapture --ignored
