@@ -4,7 +4,13 @@
 //! program and live DEX liquidity pools.
 //!
 //! Run: cargo test --test jupiter_cpi -- --nocapture
-//! Note: requires fixtures/jupiter_v6.so (dump via `solana program dump -u m JUP6...`)
+//!
+//! Prerequisites (built by the LiteSVM CI workflow):
+//!   - target/deploy/axis_g3m.so  (via `cargo build-sbf`)
+//!   - fixtures/jupiter_v6.so     (via `solana program dump -u m JUP6...`)
+//!
+//! When these files are absent (e.g. in the generic Rust CI job that only
+//! runs `cargo test`), the tests skip gracefully instead of panicking.
 
 use litesvm::LiteSVM;
 use solana_account::Account;
@@ -19,6 +25,19 @@ use solana_transaction::Transaction;
 
 const AXIS_G3M_ID: &str = "65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi";
 const JUPITER_V6_ID: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+
+const AXIS_G3M_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/deploy/axis_g3m.so");
+const JUPITER_V6_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/jupiter_v6.so");
+
+/// Skip the test (pass) if a required fixture file does not exist.
+macro_rules! require_fixture {
+    ($path:expr) => {
+        if !std::path::Path::new($path).exists() {
+            eprintln!("SKIP: fixture not found — {}", $path);
+            return;
+        }
+    };
+}
 
 const TOKEN_PROGRAM_ID_BYTES: [u8; 32] = [
     0x06, 0xdd, 0xf6, 0xe1, 0xd7, 0x65, 0xa1, 0x93,
@@ -172,11 +191,12 @@ fn build_pool_state(
 /// Validates basic program functionality before CPI test.
 #[test]
 fn test_g3m_basic_lifecycle() {
+    require_fixture!(AXIS_G3M_SO);
+
     let mut svm = LiteSVM::new();
 
     let program_id: Address = AXIS_G3M_ID.parse().unwrap();
-    svm.add_program_from_file(program_id, "target/deploy/axis_g3m.so")
-        .unwrap();
+    svm.add_program_from_file(program_id, AXIS_G3M_SO).unwrap();
 
     let authority = Keypair::new();
     svm.airdrop(&authority.pubkey(), 10 * LAMPORTS_PER_SOL)
@@ -365,25 +385,17 @@ fn test_g3m_basic_lifecycle() {
 /// This is a prerequisite for the full CPI test.
 #[test]
 fn test_jupiter_program_loads() {
+    require_fixture!(JUPITER_V6_SO);
+
     let mut svm = LiteSVM::new();
 
     let jupiter_id: Address = JUPITER_V6_ID.parse().unwrap();
-    let fixture_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/jupiter_v6.so"
-    );
+    svm.add_program_from_file(jupiter_id, JUPITER_V6_SO).unwrap();
 
-    match svm.add_program_from_file(jupiter_id, fixture_path) {
-        Ok(()) => {
-            println!("✓ Jupiter V6 loaded into LiteSVM");
-            let acc = svm.get_account(&jupiter_id).unwrap();
-            assert!(acc.executable, "Jupiter should be executable");
-            println!("  Account size: {} bytes", acc.data.len());
-        }
-        Err(e) => {
-            panic!("Failed to load Jupiter: {:?}", e);
-        }
-    }
+    println!("✓ Jupiter V6 loaded into LiteSVM");
+    let acc = svm.get_account(&jupiter_id).unwrap();
+    assert!(acc.executable, "Jupiter should be executable");
+    println!("  Account size: {} bytes", acc.data.len());
 }
 
 /// Test 3: Full RebalanceViaJupiter CPI test with mainnet-forked state.
@@ -400,6 +412,9 @@ fn test_jupiter_program_loads() {
 #[test]
 #[ignore = "requires mainnet RPC — run with --ignored"]
 fn test_jupiter_rebalance_mainnet_fork() {
+    require_fixture!(AXIS_G3M_SO);
+    require_fixture!(JUPITER_V6_SO);
+
     use solana_rpc_client::rpc_client::RpcClient;
 
     let rpc_url = std::env::var("MAINNET_RPC_URL")
@@ -410,13 +425,11 @@ fn test_jupiter_rebalance_mainnet_fork() {
 
     // Load our program
     let axis_g3m_id: Address = AXIS_G3M_ID.parse().unwrap();
-    svm.add_program_from_file(axis_g3m_id, "target/deploy/axis_g3m.so")
-        .unwrap();
+    svm.add_program_from_file(axis_g3m_id, AXIS_G3M_SO).unwrap();
 
     // Load Jupiter V6
     let jupiter_id: Address = JUPITER_V6_ID.parse().unwrap();
-    let fixture_path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/jupiter_v6.so");
-    svm.add_program_from_file(jupiter_id, fixture_path).unwrap();
+    svm.add_program_from_file(jupiter_id, JUPITER_V6_SO).unwrap();
 
     println!("✓ Both programs loaded");
 
