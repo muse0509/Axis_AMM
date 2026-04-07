@@ -51,10 +51,7 @@ jobs:
       - name: Run LiteSVM unit tests (no network)
         run: |
           cd contracts/axis-g3m
-          cargo test --test jupiter_cpi \
-            test_g3m_basic_lifecycle \
-            test_jupiter_program_loads \
-            -- --nocapture
+          cargo test --test jupiter_cpi -- --nocapture --skip mainnet_fork
 
       - name: Run LiteSVM mainnet fork test
         env:
