@@ -19,7 +19,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.86.0
+          toolchain: stable
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -51,6 +51,7 @@ jobs:
       - name: Run LiteSVM unit tests (no network)
         run: |
           cd contracts/axis-g3m
+          rm -f Cargo.lock
           cargo test --test jupiter_cpi -- --nocapture --skip mainnet_fork
 
       - name: Run LiteSVM mainnet fork test
