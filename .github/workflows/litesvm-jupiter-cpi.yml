@@ -1,19 +1,28 @@
-name: LiteSVM Jupiter CPI Tests
+name: A/B Test Suite
 
 on:
-  push:
-    branches: [feat/jupiter-cpi]
   pull_request:
     branches: [main]
     paths:
-      - 'contracts/axis-g3m/**'
-      - 'contracts/pfda-amm-3/**'
-      - 'contracts/ab-integration-tests/**'
+      - 'contracts/**'
+      - '.github/workflows/litesvm-jupiter-cpi.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'contracts/**'
+      - '.github/workflows/litesvm-jupiter-cpi.yml'
+
+concurrency:
+  group: ab-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  litesvm-tests:
+  ab-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +31,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.6"
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -32,13 +46,21 @@ jobs:
             contracts/axis-g3m/target
             contracts/pfda-amm-3/target
             contracts/ab-integration-tests/target
-          key: litesvm-${{ hashFiles('contracts/ab-integration-tests/Cargo.lock', 'contracts/axis-g3m/Cargo.lock') }}
+          key: ab-${{ hashFiles('contracts/ab-integration-tests/Cargo.lock', 'contracts/axis-g3m/Cargo.lock') }}
 
       - name: Install Solana CLI
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      # ── TypeScript checks ──
+      - name: TypeScript type check
+        run: bun run typecheck 2>&1 || true
+
+      # ── Build SBF programs ──
       - name: Build SBF programs
         run: |
           cd contracts/axis-g3m && cargo build-sbf
@@ -52,33 +74,42 @@ jobs:
             JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 \
             contracts/axis-g3m/fixtures/jupiter_v6.so
 
-      # ── axis-g3m per-program tests ──
+      # ── LiteSVM unit tests ──
       - name: Run axis-g3m LiteSVM tests
         run: |
           cd contracts/axis-g3m
           cargo test --test jupiter_cpi -- --nocapture --skip mainnet_fork
 
-      # ── A/B comparison tests (no network) ──
-      - name: Run A/B comparison tests (local)
+      - name: Run A/B comparison tests (LiteSVM)
         run: |
           cd contracts/ab-integration-tests
-          cargo test --test ab_comparison -- --nocapture --skip jupiter
+          cargo test --test ab_comparison -- --nocapture --skip jupiter --skip mainnet
 
-      # ── Multi-scenario report generation ──
-      - name: Generate A/B report (LiteSVM)
+      - name: Generate LiteSVM A/B report
         run: |
           cd contracts/ab-integration-tests
           cargo test --test ab_comparison test_ab_multi_scenario_report -- --nocapture
 
-      - name: Upload report artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ab-report
-          path: reports/ab/latest.*
+      # ── Mainnet fork via solana-test-validator --clone ──
+      - name: Start validator with mainnet-forked Jupiter
+        run: |
+          solana-test-validator \
+            --reset \
+            --ledger /tmp/fork-ledger \
+            --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi contracts/axis-g3m/target/deploy/axis_g3m.so \
+            --bpf-program DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf contracts/pfda-amm-3/target/deploy/pfda_amm_3.so \
+            --clone JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 \
+            --clone TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA \
+            --url https://api.mainnet-beta.solana.com \
+            > /tmp/fork-validator.log 2>&1 &
+          echo $! > /tmp/fork-validator.pid
+          for i in $(seq 1 30); do
+            solana cluster-version -u localhost 2>/dev/null && break
+            sleep 1
+          done
+          echo "Validator ready"
 
-      # ── Mainnet fork tests (Jupiter CPI + A/B) ──
-      - name: Run mainnet fork PR validation
+      - name: Run mainnet-fork LiteSVM PR validation
         env:
           MAINNET_RPC_URL: https://api.mainnet-beta.solana.com
           AB_FORK_REPEATS: "3"
@@ -88,23 +119,33 @@ jobs:
           cd ../ab-integration-tests
           cargo test --test ab_comparison test_ab_pr_validation_mainnet_fork -- --nocapture --ignored
 
-      - name: Publish mainnet-fork report to Job Summary
+      - name: Stop forked validator
         if: always()
-        run: |
-          if [ -f reports/ab/mainnet-fork/latest.json ]; then
-            echo "## Mainnet-Fork A/B Report" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo '```json' >> $GITHUB_STEP_SUMMARY
-            cat reports/ab/mainnet-fork/latest.json >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          fi
+        run: kill $(cat /tmp/fork-validator.pid 2>/dev/null) 2>/dev/null || true
 
-      - name: Publish LiteSVM PR validation to Job Summary
+      # ── Job Summary ──
+      - name: Publish reports to Job Summary
         if: always()
         run: |
+          echo "# A/B Test Reports" >> $GITHUB_STEP_SUMMARY
+
           if [ -f reports/ab/pr-validation/latest.md ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             cat reports/ab/pr-validation/latest.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f reports/ab/mainnet-fork/latest.json ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## Mainnet-Fork Report" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            head -100 reports/ab/mainnet-fork/latest.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f reports/ab/latest.md ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## Multi-Scenario CU Report" >> $GITHUB_STEP_SUMMARY
+            cat reports/ab/latest.md >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Upload all reports

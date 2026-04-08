@@ -3,8 +3,9 @@ name: Main AB Report
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'reports/**'
+    paths:
+      - 'contracts/**'
+      - '.github/workflows/main-report.yml'
 
 concurrency:
   group: main-ab-report-${{ github.ref }}
@@ -16,7 +17,7 @@ permissions:
 jobs:
   update-ab-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +26,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.6"
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -41,6 +47,12 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: TypeScript type check
+        run: bun run typecheck 2>&1 || true
 
       - name: Build SBF programs
         run: |
@@ -59,6 +71,64 @@ jobs:
         run: |
           cd contracts/ab-integration-tests
           cargo test --test ab_comparison test_ab_multi_scenario_report -- --nocapture
+
+      - name: Run LiteSVM PR validation
+        run: |
+          cd contracts/ab-integration-tests
+          cargo test --test ab_comparison test_ab_pr_validation_litesvm -- --nocapture
+
+      # ── Mainnet fork via solana-test-validator --clone ──
+      - name: Start validator with mainnet-forked Jupiter
+        run: |
+          solana-test-validator \
+            --reset \
+            --ledger /tmp/fork-ledger \
+            --bpf-program 65aE9QdVz5bapV19BGt5cyTgVitYpekGwusRoQEovNUi contracts/axis-g3m/target/deploy/axis_g3m.so \
+            --bpf-program DbAPmgkrpCCZrpBMv5x1ye6nJUreqY313SuQjZsMyjEf contracts/pfda-amm-3/target/deploy/pfda_amm_3.so \
+            --clone JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 \
+            --clone TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA \
+            --url https://api.mainnet-beta.solana.com \
+            > /tmp/fork-validator.log 2>&1 &
+          echo $! > /tmp/fork-validator.pid
+          for i in $(seq 1 30); do
+            solana cluster-version -u localhost 2>/dev/null && break
+            sleep 1
+          done
+
+      - name: Run mainnet-fork validation
+        env:
+          MAINNET_RPC_URL: https://api.mainnet-beta.solana.com
+          AB_FORK_REPEATS: "5"
+        run: |
+          cd contracts/ab-integration-tests
+          cargo test --test ab_comparison test_ab_pr_validation_mainnet_fork -- --nocapture --ignored
+
+      - name: Stop forked validator
+        if: always()
+        run: kill $(cat /tmp/fork-validator.pid 2>/dev/null) 2>/dev/null || true
+
+      # ── Job Summary ──
+      - name: Publish reports to Job Summary
+        if: always()
+        run: |
+          echo "# Main Branch A/B Report" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f reports/ab/pr-validation/latest.md ]; then
+            cat reports/ab/pr-validation/latest.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f reports/ab/mainnet-fork/latest.json ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## Mainnet-Fork" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            head -100 reports/ab/mainnet-fork/latest.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f reports/ab/latest.md ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat reports/ab/latest.md >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Commit and push report
         run: |
