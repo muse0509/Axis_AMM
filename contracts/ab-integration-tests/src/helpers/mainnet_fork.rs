@@ -221,19 +221,27 @@ pub fn fork_jupiter_state(svm: &mut LiteSVM, rpc: &RpcClient, route: &JupiterRou
             continue;
         }
 
-        if ja.is_writable {
-            // Writable accounts need realloc headroom
-            if clone_with_realloc_padding(svm, rpc, &ja.pubkey, MAX_PERMITTED_DATA_INCREASE) {
-                total += 1;
+        // Already loaded (e.g. our own program)? Skip.
+        if let Some(existing) = svm.get_account(&ja.pubkey) {
+            if existing.executable {
+                program_addrs.push(ja.pubkey);
             }
-        } else {
-            if clone_from_rpc(svm, rpc, &ja.pubkey) {
-                total += 1;
-                // Check if this is a program (executable) — need its programdata too
-                if let Some(acc) = svm.get_account(&ja.pubkey) {
-                    if acc.executable {
-                        program_addrs.push(ja.pubkey);
-                    }
+            // Still pad writable accounts that already exist
+            if ja.is_writable && existing.data.len() < 165 + MAX_PERMITTED_DATA_INCREASE {
+                let mut padded = existing.clone();
+                padded.data.resize(padded.data.len() + MAX_PERMITTED_DATA_INCREASE, 0);
+                svm.set_account(ja.pubkey, padded).unwrap();
+            }
+            continue;
+        }
+
+        // Clone from mainnet — pad ALL accounts (not just writable) because
+        // Jupiter may CPI into DEX programs that realloc their own accounts
+        if clone_with_realloc_padding(svm, rpc, &ja.pubkey, MAX_PERMITTED_DATA_INCREASE) {
+            total += 1;
+            if let Some(acc) = svm.get_account(&ja.pubkey) {
+                if acc.executable {
+                    program_addrs.push(ja.pubkey);
                 }
             }
         }
