@@ -629,9 +629,14 @@ fn test_ab_full_with_jupiter_rebalance() {
         AccountMeta::new(g3m_vaults[0], false),        // vault 0
         AccountMeta::new(g3m_vaults[1], false),        // vault 1
     ];
-    // Append Jupiter route accounts (skip any that are already in our list)
+    // Append Jupiter route accounts — all is_signer = false because the pool PDA
+    // signs via CPI seeds internally, not as an external transaction signer.
     for ja in &route.accounts {
-        accounts.push(AccountMeta::new(ja.pubkey, ja.is_signer && ja.pubkey != payer.pubkey()));
+        if ja.is_writable {
+            accounts.push(AccountMeta::new(ja.pubkey, false));
+        } else {
+            accounts.push(AccountMeta::new_readonly(ja.pubkey, false));
+        }
     }
 
     let ix = Instruction { program_id: g3m_pid, accounts, data: ix_data };
