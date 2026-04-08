@@ -88,9 +88,31 @@ jobs:
           cd ../ab-integration-tests
           cargo test --test ab_comparison test_ab_pr_validation_mainnet_fork -- --nocapture --ignored
 
-      - name: Upload mainnet-fork report
+      - name: Publish mainnet-fork report to Job Summary
+        if: always()
+        run: |
+          if [ -f reports/ab/mainnet-fork/latest.json ]; then
+            echo "## Mainnet-Fork A/B Report" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat reports/ab/mainnet-fork/latest.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Publish LiteSVM PR validation to Job Summary
+        if: always()
+        run: |
+          if [ -f reports/ab/pr-validation/latest.md ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat reports/ab/pr-validation/latest.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload all reports
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mainnet-fork-report
-          path: reports/ab/mainnet-fork/
+          name: ab-reports
+          path: |
+            reports/ab/latest.*
+            reports/ab/pr-validation/latest.*
+            reports/ab/mainnet-fork/latest.*

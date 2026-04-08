@@ -2410,11 +2410,12 @@ fn run_mainnet_fork_pair(
     let (g_pool, g_bump) =
         Address::find_program_address(&[b"g3m_pool", payer.pubkey().as_ref()], &g3m_pid);
     let gv = [Address::new_unique(), Address::new_unique()];
-    create_token_account(&mut svm, gv[0], wsol, &g_pool, reserve_sol);
-    create_token_account(&mut svm, gv[1], usdc, &g_pool, reserve_usdc);
+    // Pad vault accounts with 10KB realloc headroom for Jupiter CPI
+    create_token_account_padded(&mut svm, gv[0], wsol, &g_pool, reserve_sol, 10_240);
+    create_token_account_padded(&mut svm, gv[1], usdc, &g_pool, reserve_usdc, 10_240);
     let gu = [Address::new_unique(), Address::new_unique()];
-    create_token_account(&mut svm, gu[0], wsol, &payer.pubkey(), reserve_sol * 10);
-    create_token_account(&mut svm, gu[1], usdc, &payer.pubkey(), reserve_usdc * 10);
+    create_token_account_padded(&mut svm, gu[0], wsol, &payer.pubkey(), reserve_sol * 10, 10_240);
+    create_token_account_padded(&mut svm, gu[1], usdc, &payer.pubkey(), reserve_usdc * 10, 10_240);
 
     // Pre-seed pool
     let pool_data = build_g3m_pool_state(

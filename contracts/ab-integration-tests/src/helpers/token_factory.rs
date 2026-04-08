@@ -84,6 +84,36 @@ pub fn create_uninit_token_account(svm: &mut LiteSVM, addr: Address) {
     .unwrap();
 }
 
+/// Create a token account with extra data padding for CPI realloc headroom.
+/// Used for vault accounts that Jupiter may need to resize during swaps.
+pub fn create_token_account_padded(
+    svm: &mut LiteSVM,
+    addr: Address,
+    mint: &Address,
+    owner: &Address,
+    amount: u64,
+    extra_bytes: usize,
+) {
+    let total_size = 165 + extra_bytes;
+    let mut data = vec![0u8; total_size];
+    data[0..32].copy_from_slice(mint.as_ref());
+    data[32..64].copy_from_slice(owner.as_ref());
+    data[64..72].copy_from_slice(&amount.to_le_bytes());
+    data[108] = 1; // Initialized
+
+    svm.set_account(
+        addr,
+        Account {
+            lamports: LAMPORTS_PER_SOL * 2, // extra SOL for rent on larger account
+            data,
+            owner: token_program_id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
 /// Read token amount from an SPL token account (offset 64, 8 bytes LE).
 pub fn read_token_amount(svm: &LiteSVM, addr: &Address) -> u64 {
     let acc = svm.get_account(addr).expect("account not found");

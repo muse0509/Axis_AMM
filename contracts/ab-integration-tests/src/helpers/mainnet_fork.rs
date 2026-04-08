@@ -3,10 +3,40 @@ use serde::Deserialize;
 use solana_address::Address;
 use solana_rpc_client::rpc_client::RpcClient;
 
+use solana_account::Account;
+
+/// Solana runtime permits up to 10KB realloc per CPI call.
+const MAX_PERMITTED_DATA_INCREASE: usize = 10_240;
+
 /// Clone an account from mainnet RPC into LiteSVM.
 pub fn clone_from_rpc(svm: &mut LiteSVM, rpc: &RpcClient, addr: &Address) -> bool {
     match rpc.get_account(addr) {
         Ok(account) => {
+            svm.set_account(*addr, account).unwrap();
+            true
+        }
+        Err(e) => {
+            eprintln!("  warn: clone failed {}: {}", addr, e);
+            false
+        }
+    }
+}
+
+/// Clone an account with extra data padding to allow realloc in CPI.
+///
+/// Jupiter's SharedAccountsRoute reallocates intermediate token accounts
+/// during swaps. In LiteSVM, `set_account` fixes the data size — the runtime
+/// won't allow growing beyond it. We pad writable accounts with zero bytes
+/// to give the CPI room to realloc.
+pub fn clone_with_realloc_padding(
+    svm: &mut LiteSVM,
+    rpc: &RpcClient,
+    addr: &Address,
+    extra_bytes: usize,
+) -> bool {
+    match rpc.get_account(addr) {
+        Ok(mut account) => {
+            account.data.resize(account.data.len() + extra_bytes, 0);
             svm.set_account(*addr, account).unwrap();
             true
         }
@@ -176,9 +206,79 @@ pub fn fetch_jupiter_route(
 }
 
 /// Clone all accounts referenced in a Jupiter route from mainnet.
+///
+/// Writable accounts get extra data padding (10KB) to support realloc
+/// during Jupiter's CPI. We also detect and clone any program accounts
+/// (executables) that the route references, including their programdata
+/// accounts for BPF Upgradeable Loader programs.
 pub fn fork_jupiter_state(svm: &mut LiteSVM, rpc: &RpcClient, route: &JupiterRoute) -> usize {
-    let addrs: Vec<Address> = route.accounts.iter().map(|a| a.pubkey).collect();
-    let mut total = clone_accounts_batch(svm, rpc, &addrs);
-    total += clone_accounts_batch(svm, rpc, &route.address_lookup_tables);
+    let mut total = 0;
+    let mut program_addrs = Vec::new();
+
+    for ja in &route.accounts {
+        // Skip system programs and known builtins (already in LiteSVM)
+        if is_builtin(&ja.pubkey) {
+            continue;
+        }
+
+        if ja.is_writable {
+            // Writable accounts need realloc headroom
+            if clone_with_realloc_padding(svm, rpc, &ja.pubkey, MAX_PERMITTED_DATA_INCREASE) {
+                total += 1;
+            }
+        } else {
+            if clone_from_rpc(svm, rpc, &ja.pubkey) {
+                total += 1;
+                // Check if this is a program (executable) — need its programdata too
+                if let Some(acc) = svm.get_account(&ja.pubkey) {
+                    if acc.executable {
+                        program_addrs.push(ja.pubkey);
+                    }
+                }
+            }
+        }
+    }
+
+    // Clone address lookup tables
+    for alt in &route.address_lookup_tables {
+        if clone_from_rpc(svm, rpc, alt) {
+            total += 1;
+        }
+    }
+
+    // For each program discovered in the route, clone its programdata account
+    // (BPF Upgradeable Loader stores the actual bytecode in a separate account)
+    for prog_addr in &program_addrs {
+        if let Some(acc) = svm.get_account(prog_addr) {
+            // BPF Upgradeable Loader: first 4 bytes = account type (2 = Program),
+            // next 32 bytes = programdata address
+            if acc.data.len() >= 36 {
+                let tag = u32::from_le_bytes(acc.data[0..4].try_into().unwrap_or([0; 4]));
+                if tag == 2 {
+                    // tag 2 = Program account, next 32 bytes = programdata
+                    let pd_bytes: [u8; 32] = acc.data[4..36].try_into().unwrap();
+                    let pd_addr = Address::from(pd_bytes);
+                    // Programdata can be large (megabytes), clone it
+                    if clone_from_rpc(svm, rpc, &pd_addr) {
+                        total += 1;
+                    }
+                }
+            }
+        }
+    }
+
     total
+}
+
+/// Check if an address is a known builtin program (already loaded in LiteSVM).
+fn is_builtin(addr: &Address) -> bool {
+    let bytes = addr.as_ref();
+    // System Program (all zeros)
+    if bytes == &[0u8; 32] { return true; }
+    // Check known program IDs by their last byte pattern (fast heuristic)
+    // Token Program: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+    if bytes[31] == 0xa9 && bytes[0] == 0x06 { return true; }
+    // Sysvar Clock, Instructions, etc. (11111111...)
+    if bytes.iter().all(|&b| b == 0x01 || b == 0x00) { return true; }
+    false
 }
