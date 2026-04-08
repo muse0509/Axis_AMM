@@ -536,19 +536,182 @@ fn test_ab_comparison_local() {
         &payer).expect("PFDA claim");
     println!("  Claim: {} CU", p_claim);
 
-    // ═══════ A/B Comparison ═══════
-    let comparison = ABComparison {
+    let received = read_token_amount(&svm, &pfda_user[1]) - 10_000_000_000;
+
+    // ═══════ A/B Report ═══════
+    let mut report = ABReport::new("LiteSVM (local, no network)");
+    report.add_scenario(ABScenario {
+        name: "Balanced pool, small swap".to_string(),
+        description: "Equal reserves, 1% swap size".to_string(),
+        swap_amount,
+        initial_reserves: vec![initial_reserve; 2],
         g3m: G3mMetrics {
             init_cu: g_init, swap_cu: g_swap, check_drift_cu: g_drift,
             rebalance_cu: g_reb, total_slots: 1, ..Default::default()
         },
         pfda3: Pfda3Metrics {
             swap_request_cu: p_swap, clear_batch_cu: p_clear, claim_cu: p_claim,
-            batch_window_slots: 10, total_slots: 11, ..Default::default()
+            tokens_received: received, batch_window_slots: 10, total_slots: 11,
+            ..Default::default()
         },
-    };
-    comparison.print_report();
+    });
+
+    report.print_table();
+
+    // Write reports to reports/ab/ directory
+    let report_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let reports_dir = format!("{}/reports/ab", report_dir);
+    std::fs::create_dir_all(&reports_dir).ok();
+    std::fs::write(format!("{}/latest.json", reports_dir), report.to_json()).ok();
+    std::fs::write(format!("{}/latest.md", reports_dir), report.to_markdown()).ok();
+    println!("  Reports written to {}", reports_dir);
     println!("✓ A/B local comparison passed");
+}
+
+// ─── Parameterized scenario runner ───────────────────────────────────────
+
+/// Run one A/B scenario in a fresh SVM and return both metrics.
+fn run_scenario(
+    reserve: u64,
+    swap_amount: u64,
+    drift_swap: u64,
+) -> (G3mMetrics, Pfda3Metrics) {
+    let mut svm = create_dual_program_svm().expect("load programs");
+    let g3m_pid = axis_g3m_id();
+    let pfda_pid = pfda3_id();
+
+    let payer = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 100 * LAMPORTS_PER_SOL).unwrap();
+
+    let mints: [Address; 3] = [Address::new_unique(), Address::new_unique(), Address::new_unique()];
+    for &m in &mints { create_mint(&mut svm, m, &payer.pubkey(), 6); }
+
+    // ── G3M ──
+    let (g3m_pool, _) = Address::find_program_address(&[b"g3m_pool", payer.pubkey().as_ref()], &g3m_pid);
+    let gv = [Address::new_unique(), Address::new_unique()];
+    for i in 0..2 { create_token_account(&mut svm, gv[i], &mints[i], &g3m_pool, 0); }
+    let gu = [Address::new_unique(), Address::new_unique()];
+    for i in 0..2 { create_token_account(&mut svm, gu[i], &mints[i], &payer.pubkey(), reserve * 5); }
+
+    let g_init = send(&mut svm,
+        g3m_init_ix(g3m_pid, payer.pubkey(), g3m_pool, &gu, &gv,
+            2, 100, 500, 0, &[5000, 5000], &[reserve, reserve]),
+        &payer).expect("G3M init");
+
+    let g_swap = send(&mut svm,
+        g3m_swap_ix(g3m_pid, payer.pubkey(), g3m_pool, gu[0], gu[1],
+            gv[0], gv[1], 0, 1, swap_amount, 1),
+        &payer).expect("G3M swap");
+
+    let g_drift = send(&mut svm,
+        g3m_check_drift_ix(g3m_pid, g3m_pool),
+        &payer).expect("G3M drift");
+
+    // Induce drift for rebalance
+    let _ = send(&mut svm,
+        g3m_swap_ix(g3m_pid, payer.pubkey(), g3m_pool, gu[0], gu[1],
+            gv[0], gv[1], 0, 1, drift_swap, 1),
+        &payer).expect("G3M drift swap");
+
+    let rv0 = read_token_amount(&svm, &gv[0]);
+    let rv1 = read_token_amount(&svm, &gv[1]);
+    let balanced = (rv0 + rv1) / 2;
+    let g_reb = send(&mut svm,
+        g3m_rebalance_ix(g3m_pid, payer.pubkey(), g3m_pool, &[balanced, balanced]),
+        &payer).expect("G3M rebalance");
+
+    let gm = G3mMetrics {
+        init_cu: g_init, swap_cu: g_swap, check_drift_cu: g_drift,
+        rebalance_cu: g_reb,
+        post_reserves: vec![read_token_amount(&svm, &gv[0]), read_token_amount(&svm, &gv[1])],
+        total_slots: 1, ..Default::default()
+    };
+
+    // ── PFDA-3 ──
+    warp_to_slot(&mut svm, 100);
+    let (pp, pb) = Address::find_program_address(
+        &[b"pool3", mints[0].as_ref(), mints[1].as_ref(), mints[2].as_ref()], &pfda_pid);
+    let (pq0, qb) = Address::find_program_address(
+        &[b"queue3", pp.as_ref(), &0u64.to_le_bytes()], &pfda_pid);
+
+    let pv: [Address; 3] = [Address::new_unique(), Address::new_unique(), Address::new_unique()];
+    let pu: [Address; 3] = [Address::new_unique(), Address::new_unique(), Address::new_unique()];
+    for i in 0..3 {
+        create_token_account(&mut svm, pv[i], &mints[i], &pp, reserve);
+        create_token_account(&mut svm, pu[i], &mints[i], &payer.pubkey(), reserve * 10);
+    }
+
+    let we = 110u64;
+    let pd = build_pfda3_pool_state(&mints, &pv, &[reserve; 3],
+        &[333_333, 333_333, 333_334], 10, 0, we, &payer.pubkey(), &payer.pubkey(), 30, pb);
+    svm.set_account(pp, Account { lamports: LAMPORTS_PER_SOL, data: pd, owner: pfda_pid, executable: false, rent_epoch: 0 }).unwrap();
+    let qd = build_batch_queue_3(&pp, 0, &[0; 3], we, qb);
+    svm.set_account(pq0, Account { lamports: LAMPORTS_PER_SOL, data: qd, owner: pfda_pid, executable: false, rent_epoch: 0 }).unwrap();
+
+    let (ticket, _) = Address::find_program_address(
+        &[b"ticket3", pp.as_ref(), payer.pubkey().as_ref(), &0u64.to_le_bytes()], &pfda_pid);
+    let p_swap = send(&mut svm,
+        pfda3_swap_request_ix(pfda_pid, payer.pubkey(), pp, pq0, ticket, pu[0], pv[0], 0, swap_amount, 1, 0),
+        &payer).expect("PFDA swap");
+
+    warp_to_slot(&mut svm, we + 1);
+    let (hist, _) = Address::find_program_address(&[b"history3", pp.as_ref(), &0u64.to_le_bytes()], &pfda_pid);
+    let (q1, _) = Address::find_program_address(&[b"queue3", pp.as_ref(), &1u64.to_le_bytes()], &pfda_pid);
+    let p_clear = send(&mut svm,
+        pfda3_clear_batch_ix(pfda_pid, payer.pubkey(), pp, pq0, hist, q1),
+        &payer).expect("PFDA clear");
+
+    let p_claim = send(&mut svm,
+        pfda3_claim_ix(pfda_pid, payer.pubkey(), pp, hist, ticket, &pv, &pu),
+        &payer).expect("PFDA claim");
+
+    let received = read_token_amount(&svm, &pu[1]).saturating_sub(reserve * 10);
+
+    let pm = Pfda3Metrics {
+        swap_request_cu: p_swap, clear_batch_cu: p_clear, claim_cu: p_claim,
+        tokens_received: received, batch_window_slots: 10, total_slots: 11,
+        ..Default::default()
+    };
+
+    (gm, pm)
+}
+
+/// Multi-scenario A/B report: generates JSON + Markdown reports.
+#[test]
+fn test_ab_multi_scenario_report() {
+    require_fixture!(AXIS_G3M_SO);
+    require_fixture!(PFDA_AMM_3_SO);
+
+    let scenarios = [
+        ("Small pool, tiny swap", 1_000_000u64, 10_000u64, 200_000u64),
+        ("Medium pool, 1% swap", 100_000_000, 1_000_000, 20_000_000),
+        ("Large pool, 0.5% swap", 1_000_000_000, 5_000_000, 200_000_000),
+        ("Large pool, 1% swap", 1_000_000_000, 10_000_000, 200_000_000),
+    ];
+
+    let mut report = ABReport::new("LiteSVM (local, multi-scenario)");
+
+    for (name, reserve, swap, drift) in &scenarios {
+        println!("  Running: {} (reserve={}, swap={})", name, reserve, swap);
+        let (gm, pm) = run_scenario(*reserve, *swap, *drift);
+        report.add_scenario(ABScenario {
+            name: name.to_string(),
+            description: format!("Reserve: {}, Swap: {}, Drift trigger: {}", reserve, swap, drift),
+            swap_amount: *swap,
+            initial_reserves: vec![*reserve; 2],
+            g3m: gm,
+            pfda3: pm,
+        });
+    }
+
+    report.print_table();
+
+    let report_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reports/ab");
+    std::fs::create_dir_all(report_dir).ok();
+    std::fs::write(format!("{}/latest.json", report_dir), report.to_json()).ok();
+    std::fs::write(format!("{}/latest.md", report_dir), report.to_markdown()).ok();
+    println!("\n  Reports: {}/latest.{{json,md}}", report_dir);
+    println!("✓ Multi-scenario A/B report generated");
 }
 
 #[test]

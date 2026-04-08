@@ -1,0 +1,162 @@
+{
+  "generated_at": "1775576568s-since-epoch",
+  "environment": "LiteSVM (local, multi-scenario)",
+  "scenarios": [
+    {
+      "name": "Small pool, tiny swap",
+      "description": "Reserve: 1000000, Swap: 10000, Drift trigger: 200000",
+      "swap_amount": 10000,
+      "initial_reserves": [
+        1000000,
+        1000000
+      ],
+      "g3m": {
+        "init_cu": 17583,
+        "swap_cu": 11939,
+        "check_drift_cu": 1259,
+        "rebalance_cu": 9494,
+        "pre_k": 0,
+        "post_k": 0,
+        "pre_reserves": [],
+        "post_reserves": [
+          1210000,
+          827927
+        ],
+        "total_slots": 1
+      },
+      "pfda3": {
+        "init_cu": 0,
+        "add_liq_cu": 0,
+        "swap_request_cu": 7736,
+        "clear_batch_cu": 10536,
+        "claim_cu": 3223,
+        "clearing_prices": [
+          0,
+          0,
+          0
+        ],
+        "total_value_in": 0,
+        "tokens_received": 9970,
+        "batch_window_slots": 10,
+        "total_slots": 11
+      }
+    },
+    {
+      "name": "Medium pool, 1% swap",
+      "description": "Reserve: 100000000, Swap: 1000000, Drift trigger: 20000000",
+      "swap_amount": 1000000,
+      "initial_reserves": [
+        100000000,
+        100000000
+      ],
+      "g3m": {
+        "init_cu": 11615,
+        "swap_cu": 11901,
+        "check_drift_cu": 1259,
+        "rebalance_cu": 9491,
+        "pre_k": 0,
+        "post_k": 0,
+        "pre_reserves": [],
+        "post_reserves": [
+          121000000,
+          82792722
+        ],
+        "total_slots": 1
+      },
+      "pfda3": {
+        "init_cu": 0,
+        "add_liq_cu": 0,
+        "swap_request_cu": 13736,
+        "clear_batch_cu": 21036,
+        "claim_cu": 3224,
+        "clearing_prices": [
+          0,
+          0,
+          0
+        ],
+        "total_value_in": 0,
+        "tokens_received": 997000,
+        "batch_window_slots": 10,
+        "total_slots": 11
+      }
+    },
+    {
+      "name": "Large pool, 0.5% swap",
+      "description": "Reserve: 1000000000, Swap: 5000000, Drift trigger: 200000000",
+      "swap_amount": 5000000,
+      "initial_reserves": [
+        1000000000,
+        1000000000
+      ],
+      "g3m": {
+        "init_cu": 11607,
+        "swap_cu": 11911,
+        "check_drift_cu": 1259,
+        "rebalance_cu": 9505,
+        "pre_k": 0,
+        "post_k": 0,
+        "pre_reserves": [],
+        "post_reserves": [
+          1205000000,
+          831327915
+        ],
+        "total_slots": 1
+      },
+      "pfda3": {
+        "init_cu": 0,
+        "add_liq_cu": 0,
+        "swap_request_cu": 9236,
+        "clear_batch_cu": 15035,
+        "claim_cu": 3224,
+        "clearing_prices": [
+          0,
+          0,
+          0
+        ],
+        "total_value_in": 0,
+        "tokens_received": 4985000,
+        "batch_window_slots": 10,
+        "total_slots": 11
+      }
+    },
+    {
+      "name": "Large pool, 1% swap",
+      "description": "Reserve: 1000000000, Swap: 10000000, Drift trigger: 200000000",
+      "swap_amount": 10000000,
+      "initial_reserves": [
+        1000000000,
+        1000000000
+      ],
+      "g3m": {
+        "init_cu": 11607,
+        "swap_cu": 11934,
+        "check_drift_cu": 1259,
+        "rebalance_cu": 9500,
+        "pre_k": 0,
+        "post_k": 0,
+        "pre_reserves": [],
+        "post_reserves": [
+          1210000000,
+          827927231
+        ],
+        "total_slots": 1
+      },
+      "pfda3": {
+        "init_cu": 0,
+        "add_liq_cu": 0,
+        "swap_request_cu": 9236,
+        "clear_batch_cu": 15037,
+        "claim_cu": 3224,
+        "clearing_prices": [
+          0,
+          0,
+          0
+        ],
+        "total_value_in": 0,
+        "tokens_received": 9970000,
+        "batch_window_slots": 10,
+        "total_slots": 11
+      }
+    }
+  ]
+}

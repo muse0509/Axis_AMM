@@ -64,6 +64,19 @@ jobs:
           cd contracts/ab-integration-tests
           cargo test --test ab_comparison -- --nocapture --skip jupiter
 
+      # ── Multi-scenario report generation ──
+      - name: Generate A/B report (LiteSVM)
+        run: |
+          cd contracts/ab-integration-tests
+          cargo test --test ab_comparison test_ab_multi_scenario_report -- --nocapture
+
+      - name: Upload report artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ab-report
+          path: reports/ab/latest.*
+
       # ── Mainnet fork tests (Jupiter CPI + A/B) ──
       - name: Run mainnet fork tests
         env:

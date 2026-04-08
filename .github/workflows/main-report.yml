@@ -2,10 +2,9 @@ name: Main AB Report
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths-ignore:
-      - "reports/**"
+      - 'reports/**'
 
 concurrency:
   group: main-ab-report-${{ github.ref }}
@@ -17,66 +16,62 @@ permissions:
 jobs:
   update-ab-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          bun-version: "1.3.6"
+          toolchain: stable
 
-      - name: Cache Bun packages
+      - name: Cache Cargo
         uses: actions/cache@v4
         with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
-
-      - name: Cache Solana CLI
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/solana/install
-          key: solana-cli-${{ runner.os }}-stable-v1
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/axis-g3m/target
+            contracts/pfda-amm-3/target
+            contracts/ab-integration-tests/target
+          key: ab-report-${{ hashFiles('contracts/ab-integration-tests/Cargo.lock') }}
 
       - name: Install Solana CLI
-        run: bash ci/install-solana.sh
-
-      - name: Install JavaScript dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Configure devnet wallet
-        env:
-          SOLANA_DEVNET_KEYPAIR: ${{ secrets.SOLANA_DEVNET_KEYPAIR }}
         run: |
-          mkdir -p "$HOME/.config/solana"
-          if [[ -n "${SOLANA_DEVNET_KEYPAIR:-}" ]]; then
-            printf '%s' "${SOLANA_DEVNET_KEYPAIR}" > "$HOME/.config/solana/id.json"
-          else
-            solana-keygen new --force --no-bip39-passphrase --silent -o "$HOME/.config/solana/id.json"
-            solana -u devnet airdrop 2 || echo "Devnet airdrop failed; continuing with current balance."
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Build SBF programs
+        run: |
+          cd contracts/axis-g3m && cargo build-sbf
+          cd ../pfda-amm-3 && cargo build-sbf
+
+      - name: Dump Jupiter V6 from mainnet
+        run: |
+          mkdir -p contracts/axis-g3m/fixtures
+          solana program dump \
+            -u https://api.mainnet-beta.solana.com \
+            JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 \
+            contracts/axis-g3m/fixtures/jupiter_v6.so
+
+      - name: Generate A/B report via LiteSVM
+        run: |
+          cd contracts/ab-integration-tests
+          cargo test --test ab_comparison test_ab_multi_scenario_report -- --nocapture
+
+      - name: Commit and push report
+        run: |
+          if [ ! -f reports/ab/latest.md ]; then
+            echo "No report generated"
+            exit 0
           fi
-
-      - name: Set devnet RPC
-        run: solana config set --url devnet
-
-      - name: Ensure devnet wallet funding
-        run: bash ci/ensure-devnet-wallet-funded.sh 2
-
-      - name: Generate AB markdown report
-        run: bash ci/update-ab-report.sh
-
-      - name: Commit and push report updates
-        run: |
           if git diff --quiet -- reports/ab; then
-            echo "No report updates to commit"
+            echo "No report changes"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add reports/ab
-          git commit -m "chore(reports): refresh AB rehearsal markdown"
+          git commit -m "chore(reports): refresh A/B report via LiteSVM"
           git push
