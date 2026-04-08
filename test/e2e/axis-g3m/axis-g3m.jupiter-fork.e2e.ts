@@ -62,8 +62,8 @@ async function main() {
   console.log("▶ Step 2: Create user accounts");
   const user0 = await createAccount(conn, payer, mint0, payer.publicKey);
   const user1 = await createAccount(conn, payer, mint1, payer.publicKey);
-  await mintTo(conn, payer, mint0, user0, payer, 5_000_000_000n);
-  await mintTo(conn, payer, mint1, user1, payer, 500_000_000n);
+  await mintTo(conn, payer, mint0, user0, payer, 10_000_000_000n);
+  await mintTo(conn, payer, mint1, user1, payer, 10_000_000_000n);
 
   // PDA
   const [pool, bump] = PublicKey.findProgramAddressSync(
