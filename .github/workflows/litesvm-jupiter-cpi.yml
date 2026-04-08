@@ -91,6 +91,11 @@ jobs:
           cargo test --test ab_comparison test_ab_multi_scenario_report -- --nocapture
 
       # ── Mainnet fork via solana-test-validator --clone ──
+      - name: Create test keypair
+        run: |
+          mkdir -p ~/.config/solana
+          solana-keygen new --force --no-bip39-passphrase --silent -o ~/.config/solana/id.json
+
       - name: Start validator with mainnet-forked Jupiter
         run: |
           solana-test-validator \
