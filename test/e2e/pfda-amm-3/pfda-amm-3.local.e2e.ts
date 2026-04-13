@@ -412,8 +412,9 @@ async function main() {
   const clearDiscTx = await conn.getTransaction(clearDiscSig, {
     maxSupportedTransactionVersion: 0, commitment: "confirmed"
   });
-  if (clearDiscTx?.meta?.returnData?.data) {
-    const returnBuf = Buffer.from(clearDiscTx.meta.returnData.data[0], "base64");
+  const metaAny = clearDiscTx?.meta as any;
+  if (metaAny?.returnData?.data) {
+    const returnBuf = Buffer.from(metaAny.returnData.data[0], "base64");
     const oracleUsed = returnBuf[56];
     console.log(`  oracle_used flag in return_data: ${oracleUsed} (expected 0)`);
     if (oracleUsed !== 0) {
