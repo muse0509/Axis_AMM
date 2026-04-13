@@ -14,6 +14,10 @@ pub enum VaultError {
     OwnerMismatch = 9008,
     MintMismatch = 9009,
     InvalidTickerLength = 9010,
+    SlippageExceeded = 9011,
+    PoolPaused = 9012,
+    NavDeviationExceeded = 9013,
+    TreasuryMismatch = 9014,
 }
 
 impl From<VaultError> for ProgramError {

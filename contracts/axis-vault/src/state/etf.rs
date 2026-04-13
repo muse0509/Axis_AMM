@@ -29,12 +29,14 @@ pub struct EtfState {
     pub total_supply: u64,
     /// Treasury (receives protocol fees)
     pub treasury: [u8; 32],
+    /// Protocol fee on deposit/withdraw in basis points (e.g. 30 = 0.3%)
+    pub fee_bps: u16,
     /// Paused flag
     pub paused: u8,
     /// PDA bump
     pub bump: u8,
     /// Padding
-    pub _padding: [u8; 6],
+    pub _padding: [u8; 4],
 }
 
 impl EtfState {

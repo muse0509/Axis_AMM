@@ -87,39 +87,47 @@ pub fn process_instruction(
         }
 
         Instruction::Deposit => {
-            // Data: [amount: u64 LE][name_len: u8][name: bytes]
-            if data.len() < 9 {
+            // Data: [amount: u64 LE][min_mint_out: u64 LE][name_len: u8][name: bytes]
+            if data.len() < 17 {
                 return Err(ProgramError::InvalidInstructionData);
             }
             let amount = u64::from_le_bytes([
                 data[0], data[1], data[2], data[3],
                 data[4], data[5], data[6], data[7],
             ]);
-            let name_len = data[8] as usize;
-            if data.len() < 9 + name_len {
+            let min_mint_out = u64::from_le_bytes([
+                data[8], data[9], data[10], data[11],
+                data[12], data[13], data[14], data[15],
+            ]);
+            let name_len = data[16] as usize;
+            if data.len() < 17 + name_len {
                 return Err(ProgramError::InvalidInstructionData);
             }
-            let name = &data[9..9 + name_len];
+            let name = &data[17..17 + name_len];
 
-            instructions::process_deposit(program_id, accounts, amount, name)
+            instructions::process_deposit(program_id, accounts, amount, min_mint_out, name)
         }
 
         Instruction::Withdraw => {
-            // Data: [burn_amount: u64 LE][name_len: u8][name: bytes]
-            if data.len() < 9 {
+            // Data: [burn_amount: u64 LE][min_tokens_out: u64 LE][name_len: u8][name: bytes]
+            if data.len() < 17 {
                 return Err(ProgramError::InvalidInstructionData);
             }
             let burn_amount = u64::from_le_bytes([
                 data[0], data[1], data[2], data[3],
                 data[4], data[5], data[6], data[7],
             ]);
-            let name_len = data[8] as usize;
-            if data.len() < 9 + name_len {
+            let min_tokens_out = u64::from_le_bytes([
+                data[8], data[9], data[10], data[11],
+                data[12], data[13], data[14], data[15],
+            ]);
+            let name_len = data[16] as usize;
+            if data.len() < 17 + name_len {
                 return Err(ProgramError::InvalidInstructionData);
             }
-            let name = &data[9..9 + name_len];
+            let name = &data[17..17 + name_len];
 
-            instructions::process_withdraw(program_id, accounts, burn_amount, name)
+            instructions::process_withdraw(program_id, accounts, burn_amount, min_tokens_out, name)
         }
     }
 }

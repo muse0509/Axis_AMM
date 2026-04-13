@@ -12,7 +12,7 @@ use crate::state::{load, load_mut, EtfState};
 
 /// Withdraw — burn ETF tokens, return proportional basket tokens.
 ///
-/// share = burn_amount / total_supply
+/// share = effective_burn / total_supply (after fee deduction)
 /// For each token: output = vault_balance * share
 ///
 /// Accounts:
@@ -24,11 +24,12 @@ use crate::state::{load, load_mut, EtfState};
 ///   5..5+N: [writable] vault token accounts (source)
 ///   5+N..5+2N: [writable] withdrawer's basket token accounts (destination)
 ///
-/// Data: [burn_amount: u64][name: bytes for PDA derivation]
+/// Data: [burn_amount: u64][min_tokens_out: u64][name: bytes for PDA derivation]
 pub fn process_withdraw(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     burn_amount: u64,
+    min_tokens_out: u64,
     name: &[u8],
 ) -> ProgramResult {
     if burn_amount == 0 {
@@ -45,7 +46,7 @@ pub fn process_withdraw(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    let (tc, total_supply, authority, bump) = {
+    let (tc, total_supply, authority, bump, fee_bps) = {
         let data = etf_state_ai.try_borrow_data()?;
         let etf = unsafe { load::<EtfState>(&data) }
             .ok_or(ProgramError::InvalidAccountData)?;
@@ -55,12 +56,21 @@ pub fn process_withdraw(
         if etf.total_supply == 0 {
             return Err(VaultError::DivisionByZero.into());
         }
-        (etf.token_count as usize, etf.total_supply, etf.authority, etf.bump)
+        (etf.token_count as usize, etf.total_supply, etf.authority, etf.bump, etf.fee_bps)
     };
 
     if burn_amount > total_supply {
         return Err(VaultError::InsufficientBalance.into());
     }
+
+    // Compute fee on burn
+    let fee_amount = burn_amount
+        .checked_mul(fee_bps as u64)
+        .ok_or(VaultError::Overflow)?
+        / 10_000;
+    let effective_burn = burn_amount
+        .checked_sub(fee_amount)
+        .ok_or(VaultError::Overflow)?;
 
     // Burn ETF tokens from withdrawer
     Burn {
@@ -80,6 +90,8 @@ pub fn process_withdraw(
         Seed::from(bump_bytes.as_ref()),
     ];
 
+    let mut total_withdrawn: u64 = 0;
+
     for i in 0..tc {
         let vault = &accounts[5 + i];
         let dest = &accounts[5 + tc + i];
@@ -95,9 +107,9 @@ pub fn process_withdraw(
             )
         };
 
-        // Proportional share: vault_balance * burn_amount / total_supply
+        // Proportional share: vault_balance * effective_burn / total_supply
         let withdraw_amount = (vault_balance as u128)
-            .checked_mul(burn_amount as u128)
+            .checked_mul(effective_burn as u128)
             .ok_or(VaultError::Overflow)?
             .checked_div(total_supply as u128)
             .ok_or(VaultError::DivisionByZero)? as u64;
@@ -111,9 +123,18 @@ pub fn process_withdraw(
             }
             .invoke_signed(&[Signer::from(&vault_signer_seeds)])?;
         }
+
+        total_withdrawn = total_withdrawn
+            .checked_add(withdraw_amount)
+            .ok_or(VaultError::Overflow)?;
     }
 
-    // Update total supply
+    // Slippage check
+    if total_withdrawn < min_tokens_out {
+        return Err(VaultError::SlippageExceeded.into());
+    }
+
+    // Update total supply (checked_sub prevents underflow to u64::MAX)
     {
         let mut data = etf_state_ai.try_borrow_mut_data()?;
         let etf = unsafe { load_mut::<EtfState>(&mut data) }

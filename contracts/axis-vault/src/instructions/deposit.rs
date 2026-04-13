@@ -24,14 +24,16 @@ use crate::state::{load, load_mut, EtfState};
 ///   2: [writable]  etf_mint
 ///   3: [writable]  depositor_etf_token_account (receives minted ETF tokens)
 ///   4: []          token_program
-///   5..5+N: [writable] depositor's basket token accounts (source)
-///   5+N..5+2N: [writable] vault token accounts (destination)
+///   5: [writable]  treasury_etf_ata (receives fee ETF tokens)
+///   6..6+N: [writable] depositor's basket token accounts (source)
+///   6+N..6+2N: [writable] vault token accounts (destination)
 ///
-/// Data: [amount: u64] — base amount per token (scaled by weight)
+/// Data: [amount: u64][min_mint_out: u64] — base amount per token (scaled by weight)
 pub fn process_deposit(
     _program_id: &Pubkey,
     accounts: &[AccountInfo],
     amount: u64,
+    min_mint_out: u64,
     name: &[u8],
 ) -> ProgramResult {
     if amount == 0 {
@@ -43,13 +45,14 @@ pub fn process_deposit(
     let etf_mint_ai = &accounts[2];
     let depositor_etf_ata = &accounts[3];
     let _tok = &accounts[4];
+    let treasury_etf_ata = &accounts[5];
 
     if !depositor.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
     // Load ETF state
-    let (tc, total_supply, authority, weights, bump_seed) = {
+    let (tc, total_supply, authority, weights, bump_seed, fee_bps) = {
         let data = etf_state_ai.try_borrow_data()?;
         let etf = unsafe { load::<EtfState>(&data) }
             .ok_or(ProgramError::InvalidAccountData)?;
@@ -57,7 +60,7 @@ pub fn process_deposit(
             return Err(VaultError::InvalidDiscriminator.into());
         }
         if etf.paused != 0 {
-            return Err(VaultError::InvalidDiscriminator.into());
+            return Err(VaultError::PoolPaused.into());
         }
         (
             etf.token_count as usize,
@@ -65,10 +68,11 @@ pub fn process_deposit(
             etf.authority,
             etf.weights_bps,
             etf.bump,
+            etf.fee_bps,
         )
     };
 
-    if accounts.len() < 5 + tc * 2 {
+    if accounts.len() < 6 + tc * 2 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -86,7 +90,7 @@ pub fn process_deposit(
     } else {
         let mut min_mint: Option<u128> = None;
         for i in 0..tc {
-            let vault = &accounts[5 + tc + i];
+            let vault = &accounts[6 + tc + i];
             let data = vault.try_borrow_data()?;
             if data.len() < 72 {
                 return Err(ProgramError::InvalidAccountData);
@@ -120,10 +124,24 @@ pub fn process_deposit(
         candidate as u64
     };
 
+    // Slippage check
+    if mint_amount < min_mint_out {
+        return Err(VaultError::SlippageExceeded.into());
+    }
+
+    // Compute fee
+    let fee_amount = mint_amount
+        .checked_mul(fee_bps as u64)
+        .ok_or(VaultError::Overflow)?
+        / 10_000;
+    let net_mint = mint_amount
+        .checked_sub(fee_amount)
+        .ok_or(VaultError::Overflow)?;
+
     // Transfer basket tokens from depositor to vaults
     for i in 0..tc {
-        let source = &accounts[5 + i];
-        let vault = &accounts[5 + tc + i];
+        let source = &accounts[6 + i];
+        let vault = &accounts[6 + tc + i];
         let token_amount = token_amounts[i];
 
         if token_amount > 0 {
@@ -150,11 +168,22 @@ pub fn process_deposit(
         mint: etf_mint_ai,
         account: depositor_etf_ata,
         mint_authority: etf_state_ai,
-        amount: mint_amount,
+        amount: net_mint,
     }
     .invoke_signed(&[Signer::from(&mint_signer_seeds)])?;
 
-    // Update total supply
+    // Mint fee to treasury
+    if fee_amount > 0 {
+        MintTo {
+            mint: etf_mint_ai,
+            account: treasury_etf_ata,
+            mint_authority: etf_state_ai,
+            amount: fee_amount,
+        }
+        .invoke_signed(&[Signer::from(&mint_signer_seeds)])?;
+    }
+
+    // Update total supply (full mint_amount including fee)
     {
         let mut data = etf_state_ai.try_borrow_mut_data()?;
         let etf = unsafe { load_mut::<EtfState>(&mut data) }
