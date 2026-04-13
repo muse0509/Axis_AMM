@@ -495,6 +495,35 @@ async function main() {
   console.log(`  CU                : ${cuLog["Claim"]?.toLocaleString()}`);
   console.log(`  Token B 受取量    : ${num(received)} (≈ ${(Number(received) / 1e6).toFixed(4)} tokens)\n`);
 
+  // ── 11. CloseBatchHistory — should fail (BatchWindowNotEnded) ──────────
+  console.log("▶ Step 11: CloseBatchHistory (expect BatchWindowNotEnded)");
+  try {
+    const closeBatchHistoryIx = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: false },
+        { pubkey: poolState, isSigner: false, isWritable: false },
+        { pubkey: history0, isSigner: false, isWritable: true },
+      ],
+      data: Buffer.from([7]),
+    });
+    await sendAndConfirmTransaction(conn,
+      new Transaction().add(closeBatchHistoryIx), [payer]
+    );
+    throw new Error("CloseBatchHistory should have failed but succeeded");
+  } catch (err: any) {
+    const msg = err.message ?? String(err);
+    if (msg.includes("0x1772") || msg.includes("6002") || msg.includes("BatchWindowNotEnded")) {
+      console.log("  Correctly rejected: BatchWindowNotEnded (0x1772 / 6002)");
+    } else if (msg.includes("should have failed")) {
+      throw err;
+    } else {
+      console.log(`  Rejected with error: ${msg.slice(0, 120)}`);
+      console.log("  (Expected BatchWindowNotEnded — CLOSE_DELAY not reached)");
+    }
+  }
+  console.log();
+
   // ── サマリー ──────────────────────────────────────────────────────────
   console.log("╔══════════════════════════════════════════╗");
   console.log("║             CU サマリー                  ║");
