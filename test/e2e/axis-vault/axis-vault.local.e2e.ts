@@ -93,7 +93,13 @@ async function main() {
   }
   await sendAndConfirmTransaction(conn, createVaultsTx, [payer, ...vaultKps]);
 
-  // 5. CreateEtf
+  // 5. Create treasury keypair (separate from depositor to avoid ATA collision)
+  const treasuryKp = Keypair.generate();
+  await sendAndConfirmTransaction(conn, new Transaction().add(
+    SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: treasuryKp.publicKey, lamports: LAMPORTS_PER_SOL / 10 })
+  ), [payer]);
+
+  // 6. CreateEtf
   console.log("\n> CreateEtf");
   const weightsBuf = Buffer.alloc(TOKEN_COUNT * 2);
   for (let i = 0; i < TOKEN_COUNT; i++) weightsBuf.writeUInt16LE(WEIGHTS[i], i * 2);
@@ -129,13 +135,7 @@ async function main() {
   const totalSupply = etfInfo!.data.readBigUInt64LE(408);
   console.log("  Total supply:", totalSupply.toString());
 
-  // 6. Create user's ETF token account + treasury ETF token account
-  // Treasury needs a different owner than depositor to avoid ATA collision
-  const treasuryKp = Keypair.generate();
-  // Fund treasury keypair for rent
-  await sendAndConfirmTransaction(conn, new Transaction().add(
-    SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: treasuryKp.publicKey, lamports: LAMPORTS_PER_SOL / 10 })
-  ), [payer]);
+  // 7. Create user's ETF token account + treasury ETF token account
   const userEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, payer.publicKey);
   const treasuryEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, treasuryKp.publicKey);
 
