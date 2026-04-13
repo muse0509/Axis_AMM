@@ -129,14 +129,16 @@ async function main() {
   const totalSupply = etfInfo!.data.readBigUInt64LE(408);
   console.log("  Total supply:", totalSupply.toString());
 
-  // 6. Create user's ETF token account
+  // 6. Create user's ETF token account + treasury ETF token account
   const userEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, payer.publicKey);
+  const treasuryEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, payer.publicKey);
 
   // 7. Deposit — deposit 1000 tokens (base amount, scaled by weights)
   console.log("\n> Deposit (1000 base amount)");
   const depositData = Buffer.concat([
     Buffer.from([1]),                     // disc = Deposit
     u64Le(1_000_000_000n),               // amount (1000 tokens with 6 decimals)
+    u64Le(0n),                           // min_mint_out (0 = no slippage check)
     Buffer.from([nameBytes.length]),
     nameBytes,
   ]);
@@ -149,6 +151,7 @@ async function main() {
       { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
       { pubkey: userEtfAta, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: treasuryEtfAta, isSigner: false, isWritable: true }, // treasury ETF ATA
       // user basket token accounts (source)
       ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       // vault accounts (destination)
@@ -174,6 +177,7 @@ async function main() {
   const withdrawData = Buffer.concat([
     Buffer.from([2]),                     // disc = Withdraw
     u64Le(burnAmount),
+    u64Le(0n),                           // min_tokens_out (0 = no slippage check)
     Buffer.from([nameBytes.length]),
     nameBytes,
   ]);
