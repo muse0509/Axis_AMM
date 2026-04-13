@@ -48,6 +48,8 @@ pub struct G3mPoolState {
     pub fee_rate_bps: u16,
     /// Drift threshold in basis points (e.g., 500 = 5%)
     pub drift_threshold_bps: u16,
+    /// Max invariant drift allowed after rebalance, in bps (e.g., 50 = 0.5%)
+    pub max_invariant_drift_bps: u16,
     /// Slot of last rebalance execution
     pub last_rebalance_slot: u64,
     /// Minimum slots between rebalances (cooldown)
@@ -57,7 +59,7 @@ pub struct G3mPoolState {
     /// PDA bump seed
     pub bump: u8,
     /// Alignment padding
-    pub _padding: [u8; 6],
+    pub _padding: [u8; 4],
 }
 
 impl G3mPoolState {

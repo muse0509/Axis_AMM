@@ -161,13 +161,9 @@ pub fn process_rebalance(
         tc,
     ).ok_or(ProgramError::from(G3mError::Overflow))?;
 
-    // Invariant tolerance: stricter for attestation mode
-    let tolerance_bps: u128 = if attestation_mode { 50 } else { 100 }; // 0.5% vs 1%
+    let max_drift_bps = pool.max_invariant_drift_bps as u128;
     let min_k = old_k
-        .checked_mul(
-            10_000u128.checked_sub(tolerance_bps)
-                .ok_or(ProgramError::from(G3mError::Overflow))?
-        )
+        .checked_mul(10_000u128.saturating_sub(max_drift_bps))
         .ok_or(ProgramError::from(G3mError::Overflow))?
         .checked_div(10_000)
         .ok_or(ProgramError::from(G3mError::DivisionByZero))?;
