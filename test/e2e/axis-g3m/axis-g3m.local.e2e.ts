@@ -444,7 +444,7 @@ async function main() {
   console.log("  Re-inducing drift with a large swap...");
   const driftSwap = new Transaction().add(
     ixSwap(payer.publicKey, poolState,
-      userTokenAccounts[0], userTokenAccounts[2],
+      userAccounts[0], userAccounts[2],
       vaultAccounts[0], vaultAccounts[2],
       0, 2,
       BIG_SWAP, 0n,
