@@ -112,7 +112,7 @@ async function main() {
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: etfState, isSigner: false, isWritable: true },
       { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
-      { pubkey: payer.publicKey, isSigner: false, isWritable: false }, // treasury
+      { pubkey: treasuryKp.publicKey, isSigner: false, isWritable: false }, // treasury
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       // basket mints
@@ -130,8 +130,14 @@ async function main() {
   console.log("  Total supply:", totalSupply.toString());
 
   // 6. Create user's ETF token account + treasury ETF token account
+  // Treasury needs a different owner than depositor to avoid ATA collision
+  const treasuryKp = Keypair.generate();
+  // Fund treasury keypair for rent
+  await sendAndConfirmTransaction(conn, new Transaction().add(
+    SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: treasuryKp.publicKey, lamports: LAMPORTS_PER_SOL / 10 })
+  ), [payer]);
   const userEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, payer.publicKey);
-  const treasuryEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, payer.publicKey);
+  const treasuryEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, treasuryKp.publicKey);
 
   // 7. Deposit — deposit 1000 tokens (base amount, scaled by weights)
   console.log("\n> Deposit (1000 base amount)");
