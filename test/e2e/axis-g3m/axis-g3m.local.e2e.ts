@@ -437,6 +437,50 @@ async function main() {
   }
   console.log();
 
+  // ── 10. Rebalance with wrong Jupiter program → InvalidProgram ───────────
+  console.log("▶ Step 10: Rebalance with wrong Jupiter program → expect InvalidProgram (7020)");
+  // Build a Rebalance instruction that includes an extra account at position
+  // 2 + TOKEN_COUNT, which the program treats as the Jupiter program account.
+  // Pass a random pubkey — verify_jupiter_program should reject it.
+  const fakeJupiter = Keypair.generate().publicKey;
+  const rebalWithJupIx = (() => {
+    const reservesBuf = Buffer.alloc(targetReserves.length * 8);
+    for (let i = 0; i < targetReserves.length; i++) {
+      reservesBuf.writeBigUInt64LE(targetReserves[i], i * 8);
+    }
+    const data = Buffer.concat([Buffer.from([3]), reservesBuf]);
+
+    return new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true,  isWritable: false },
+        { pubkey: poolState,       isSigner: false, isWritable: true  },
+        // Vault accounts at positions 2..2+TOKEN_COUNT
+        ...vaultAccounts.map(pk => ({ pubkey: pk, isSigner: false, isWritable: false })),
+        // Fake Jupiter program at position 2 + TOKEN_COUNT
+        { pubkey: fakeJupiter,     isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+  })();
+
+  const jupTestTx = new Transaction().add(rebalWithJupIx);
+  try {
+    await sendAndConfirmTransaction(conn, jupTestTx, [payer]);
+    console.log("  ✗ FAIL — transaction should have been rejected");
+    process.exit(1);
+  } catch (err: any) {
+    const msg = err?.message ?? String(err);
+    const hexCode = (7020).toString(16); // 0x1b6c
+    if (msg.includes("0x" + hexCode) || msg.includes("0x" + hexCode.toUpperCase())) {
+      console.log(`  ✓ Correctly rejected with InvalidProgram (0x${hexCode})`);
+    } else {
+      console.log(`  ✗ FAIL — unexpected error: ${msg}`);
+      process.exit(1);
+    }
+  }
+  console.log();
+
   // ── Summary ──────────────────────────────────────────────────────────────
   console.log("╔══════════════════════════════════════════════╗");
   console.log("║              CU Summary                      ║");
