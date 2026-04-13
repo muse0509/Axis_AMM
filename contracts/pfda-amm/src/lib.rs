@@ -37,6 +37,7 @@ enum Instruction {
     Claim = 3,
     AddLiquidity = 4,
     UpdateWeight = 5,
+    CloseExpiredTicket = 8,
 }
 
 impl Instruction {
@@ -48,6 +49,7 @@ impl Instruction {
             3 => Some(Instruction::Claim),
             4 => Some(Instruction::AddLiquidity),
             5 => Some(Instruction::UpdateWeight),
+            8 => Some(Instruction::CloseExpiredTicket),
             _ => None,
         }
     }
@@ -155,6 +157,10 @@ pub fn process_instruction(
                 data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
             ]);
             instructions::process_update_weight(program_id, accounts, target_weight_a, weight_end_slot)
+        }
+
+        Instruction::CloseExpiredTicket => {
+            instructions::process_close_expired_ticket(program_id, accounts)
         }
     }
 }
