@@ -330,20 +330,22 @@ async function main() {
   console.log(`  Token 1 received: ${(afterBal - beforeBal).toLocaleString()}`);
 
   // ═══════════════════════════════════════════════════════════════════
-  // Step 10: BidExcessive Validation (Issue #8)
+  // Step 10: Oracle Ownership Validation (Issue #7)
   //
-  // After the normal batch 0 cycle, pool is on batch_id=1.
-  // We submit a new swap into batch 1, wait for the window, then
-  // attempt ClearBatch with an absurdly large bid_lamports value.
+  // After the normal batch 0 cycle, the pool is now on batch_id=1.
+  // We submit a new swap into batch 1, wait for its window to end,
+  // then attempt ClearBatch with 3 fake oracle accounts (random keypairs).
   //
-  // The BidExcessive check (error 8031 / 0x1F5F) validates that the
-  // bid does not exceed alpha% of estimated batch fees. For a small
-  // swap (~5M tokens), the max allowed bid is tiny, so a 100 SOL bid
-  // will be rejected.
+  // The oracle reader (oracle.rs) calls verify_switchboard_owner() which
+  // checks that the feed account is owned by the Switchboard V3 program.
+  // Random keypairs are owned by SystemProgram, so the ownership check
+  // fails and oracle prices gracefully fall back to None (reserve-only
+  // pricing). The ClearBatch itself should still succeed — the oracle
+  // check is defensive, not fatal.
   //
-  // ClearBatch instruction data layout: [disc=2][bid_lamports: u64 LE]
+  // Error code reference: OracleOwnerMismatch = 8028 (0x1F5C)
   // ═══════════════════════════════════════════════════════════════════
-  console.log("\n▶ Step 10: BidExcessive Validation (Issue #8 — error 8031 / 0x1F5F)");
+  console.log("\n▶ Step 10: Oracle Ownership Validation (Issue #7 — OracleOwnerMismatch)");
 
   // 10a. SwapRequest into batch 1
   const [ticket1] = findTicket(pool, payer.publicKey, 1n);
@@ -362,9 +364,95 @@ async function main() {
   console.log(`  Batch 1 window ends: slot ${windowEnd2}`);
   await waitForSlot(conn, windowEnd2);
 
-  // 10c. ClearBatch with excessive bid (100 SOL = 100_000_000_000 lamports)
+  // 10c. ClearBatch with 3 fake oracle accounts (random keypairs — owned by SystemProgram)
+  const fakeOracle0 = Keypair.generate();
+  const fakeOracle1 = Keypair.generate();
+  const fakeOracle2 = Keypair.generate();
+
   const [history1] = findHistory(pool, 1n);
   const [queue2] = findQueue(pool, 2n);
+
+  // Build ClearBatch with fake oracles at account positions 6, 7, 8
+  const clearWithFakeOraclesIx = new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+      { pubkey: pool, isSigner: false, isWritable: true },
+      { pubkey: queue1, isSigner: false, isWritable: true },
+      { pubkey: history1, isSigner: false, isWritable: true },
+      { pubkey: queue2, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      // Fake oracle feeds — not owned by Switchboard
+      { pubkey: fakeOracle0.publicKey, isSigner: false, isWritable: false },
+      { pubkey: fakeOracle1.publicKey, isSigner: false, isWritable: false },
+      { pubkey: fakeOracle2.publicKey, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([2]),  // disc=2, no bid
+  });
+
+  // The ClearBatch should succeed — oracle ownership mismatch causes graceful
+  // fallback to reserve-only pricing (oracle_prices = None), not a hard failure.
+  const clearOracleSig = await sendAndConfirmTransaction(conn,
+    new Transaction().add(clearWithFakeOraclesIx),
+    [payer]
+  );
+  cuLog["ClearBatch(fakeOracles)"] = await getCU(conn, clearOracleSig);
+  console.log(`  ClearBatch with fake oracles succeeded (graceful fallback): ${clearOracleSig.slice(0, 16)}...`);
+  console.log(`  CU: ${cuLog["ClearBatch(fakeOracles)"]?.toLocaleString()}`);
+
+  // Verify oracle_used=0 in return data (byte 56 of the 57-byte return buffer)
+  const clearTx = await conn.getTransaction(clearOracleSig, {
+    maxSupportedTransactionVersion: 0, commitment: "confirmed"
+  });
+  // Return data is in the transaction metadata if available
+  if ((clearTx?.meta as any)?.returnData?.data) {
+    const returnBuf = Buffer.from((clearTx!.meta as any).returnData.data[0], "base64");
+    const oracleUsed = returnBuf[56];
+    console.log(`  oracle_used flag in return_data: ${oracleUsed} (expected 0)`);
+    if (oracleUsed !== 0) {
+      throw new Error("Expected oracle_used=0 when fake oracle accounts are passed");
+    }
+  } else {
+    console.log("  (return_data not available in tx metadata — skipping oracle_used check)");
+  }
+  console.log("  PASSED: OracleOwnerMismatch triggers graceful fallback, not crash");
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Step 11: BidExcessive Validation (Issue #8)
+  //
+  // Pool is now on batch_id=2 (Step 10 advanced it). We submit a new
+  // swap into batch 2, wait for the window, then attempt ClearBatch
+  // with an absurdly large bid_lamports value.
+  //
+  // The BidExcessive check (error 8031 / 0x1F5F) validates that the
+  // bid does not exceed alpha% of estimated batch fees. For a small
+  // swap (~5M tokens), the max allowed bid is tiny, so a 100 SOL bid
+  // will be rejected.
+  //
+  // ClearBatch instruction data layout: [disc=2][bid_lamports: u64 LE]
+  // ═══════════════════════════════════════════════════════════════════
+  console.log("\n▶ Step 11: BidExcessive Validation (Issue #8 — error 8031 / 0x1F5F)");
+
+  // 11a. SwapRequest into batch 2
+  const [ticket2] = findTicket(pool, payer.publicKey, 2n);
+  const SWAP3 = 5_000_000n;
+  const swap3Sig = await sendAndConfirmTransaction(conn,
+    new Transaction().add(
+      ixSwapRequest(payer.publicKey, pool, queue2, ticket2, userAccounts[0], vaults[0], 0, SWAP3, 1, 0n)
+    ),
+    [payer]
+  );
+  console.log(`  SwapRequest into batch 2: ${swap3Sig.slice(0, 16)}...`);
+
+  // 11b. Wait for batch 2 window to end
+  const poolData3 = (await conn.getAccountInfo(pool))!.data;
+  const windowEnd3 = poolData3.readBigUInt64LE(256);
+  console.log(`  Batch 2 window ends: slot ${windowEnd3}`);
+  await waitForSlot(conn, windowEnd3);
+
+  // 11c. ClearBatch with excessive bid (100 SOL = 100_000_000_000 lamports)
+  const [history2] = findHistory(pool, 2n);
+  const [queue3] = findQueue(pool, 3n);
 
   const EXCESSIVE_BID = 100_000_000_000n; // 100 SOL — way above any fee-based cap
   const clearExcessiveBidData = Buffer.concat([
@@ -377,16 +465,11 @@ async function main() {
     keys: [
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: pool, isSigner: false, isWritable: true },
-      { pubkey: queue1, isSigner: false, isWritable: true },
-      { pubkey: history1, isSigner: false, isWritable: true },
       { pubkey: queue2, isSigner: false, isWritable: true },
+      { pubkey: history2, isSigner: false, isWritable: true },
+      { pubkey: queue3, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      // No oracle feeds (only 6 accounts → no oracles)
-      // Need treasury at account index 9 for bid payment
-      // But first, accounts 6,7,8 must exist for len > 9 check
-      // Actually, the bid check happens at accounts.len() <= 9 for treasury.
-      // But BidExcessive is checked BEFORE the treasury check, so we don't
-      // need to provide a treasury account — it will fail on BidExcessive first.
+      // No oracle feeds — BidExcessive is checked before treasury account access.
     ],
     data: clearExcessiveBidData,
   });
@@ -419,9 +502,9 @@ async function main() {
     throw new Error("BidExcessive test did not produce expected error");
   }
 
-  // 10d. Now do a clean ClearBatch (no bid) to advance the pool for future tests
+  // 11d. Clean ClearBatch (no bid) to drain batch 2 for any future steps
   const clearCleanSig = await sendAndConfirmTransaction(conn,
-    new Transaction().add(ixClearBatch(payer.publicKey, pool, queue1, history1, queue2)),
+    new Transaction().add(ixClearBatch(payer.publicKey, pool, queue2, history2, queue3)),
     [payer]
   );
   cuLog["ClearBatch(clean)"] = await getCU(conn, clearCleanSig);
