@@ -10,6 +10,13 @@ use pinocchio_token::instructions::{MintTo, Transfer};
 use crate::error::VaultError;
 use crate::state::{load, load_mut, EtfState};
 
+const TOKEN_PROGRAM_ID: [u8; 32] = [
+    0x06, 0xdd, 0xf6, 0xe1, 0xd7, 0x65, 0xa1, 0x93,
+    0xd9, 0xcb, 0xe1, 0x46, 0xce, 0xeb, 0x79, 0xac,
+    0x1c, 0xb4, 0x85, 0xed, 0x5f, 0x5b, 0x37, 0x91,
+    0x3a, 0x8c, 0xf5, 0x85, 0x7e, 0xff, 0x00, 0xa9,
+];
+
 /// Deposit — accept basket tokens, mint ETF tokens proportionally.
 ///
 /// First depositor: mint_amount = base amount
@@ -52,7 +59,7 @@ pub fn process_deposit(
     }
 
     // Load ETF state
-    let (tc, total_supply, authority, weights, bump_seed, fee_bps) = {
+    let (tc, total_supply, authority, weights, bump_seed, fee_bps, treasury) = {
         let data = etf_state_ai.try_borrow_data()?;
         let etf = unsafe { load::<EtfState>(&data) }
             .ok_or(ProgramError::InvalidAccountData)?;
@@ -69,8 +76,25 @@ pub fn process_deposit(
             etf.weights_bps,
             etf.bump,
             etf.fee_bps,
+            etf.treasury,
         )
     };
+
+    // Validate treasury_etf_ata: must be a Token Program account whose
+    // stored owner matches etf.treasury. Without this, anyone could route
+    // the protocol fee to an attacker-controlled ATA.
+    if treasury_etf_ata.owner() != &TOKEN_PROGRAM_ID {
+        return Err(VaultError::TreasuryMismatch.into());
+    }
+    {
+        let data = treasury_etf_ata.try_borrow_data()?;
+        if data.len() < 64 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if &data[32..64] != &treasury {
+            return Err(VaultError::TreasuryMismatch.into());
+        }
+    }
 
     if accounts.len() < 6 + tc * 2 {
         return Err(ProgramError::NotEnoughAccountKeys);

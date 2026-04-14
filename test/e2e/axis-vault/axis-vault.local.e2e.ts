@@ -201,6 +201,7 @@ async function main() {
       { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
       { pubkey: userEtfAta, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: treasuryEtfAta, isSigner: false, isWritable: true }, // treasury ETF ATA (fee recipient)
       // vault accounts (source)
       ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
       // user basket token accounts (destination)
@@ -320,6 +321,7 @@ async function main() {
         { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       ],

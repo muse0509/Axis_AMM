@@ -10,19 +10,32 @@ use pinocchio_token::instructions::{Burn, Transfer};
 use crate::error::VaultError;
 use crate::state::{load, load_mut, EtfState};
 
+const TOKEN_PROGRAM_ID: [u8; 32] = [
+    0x06, 0xdd, 0xf6, 0xe1, 0xd7, 0x65, 0xa1, 0x93,
+    0xd9, 0xcb, 0xe1, 0x46, 0xce, 0xeb, 0x79, 0xac,
+    0x1c, 0xb4, 0x85, 0xed, 0x5f, 0x5b, 0x37, 0x91,
+    0x3a, 0x8c, 0xf5, 0x85, 0x7e, 0xff, 0x00, 0xa9,
+];
+
 /// Withdraw — burn ETF tokens, return proportional basket tokens.
 ///
 /// share = effective_burn / total_supply (after fee deduction)
 /// For each token: output = vault_balance * share
 ///
+/// Fee design mirrors Deposit: the fee portion of the user's ETF tokens
+/// is transferred to the treasury's ETF ATA rather than destroyed, so
+/// the protocol accumulates ETF tokens from both the deposit and
+/// withdraw fee rails symmetrically.
+///
 /// Accounts:
 ///   0: [signer]    withdrawer
 ///   1: [writable]  etf_state PDA
 ///   2: [writable]  etf_mint
-///   3: [writable]  withdrawer_etf_token_account (ETF tokens to burn)
+///   3: [writable]  withdrawer_etf_token_account (source of burn + fee transfer)
 ///   4: []          token_program
-///   5..5+N: [writable] vault token accounts (source)
-///   5+N..5+2N: [writable] withdrawer's basket token accounts (destination)
+///   5: [writable]  treasury_etf_ata (receives fee ETF tokens)
+///   6..6+N: [writable] vault token accounts (source)
+///   6+N..6+2N: [writable] withdrawer's basket token accounts (destination)
 ///
 /// Data: [burn_amount: u64][min_tokens_out: u64][name: bytes for PDA derivation]
 pub fn process_withdraw(
@@ -41,23 +54,52 @@ pub fn process_withdraw(
     let etf_mint_ai = &accounts[2];
     let withdrawer_etf_ata = &accounts[3];
     let _tok = &accounts[4];
+    let treasury_etf_ata = &accounts[5];
 
     if !withdrawer.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    let (tc, total_supply, authority, bump, fee_bps) = {
+    let (tc, total_supply, authority, bump, fee_bps, treasury) = {
         let data = etf_state_ai.try_borrow_data()?;
         let etf = unsafe { load::<EtfState>(&data) }
             .ok_or(ProgramError::InvalidAccountData)?;
         if !etf.is_initialized() {
             return Err(VaultError::InvalidDiscriminator.into());
         }
+        if etf.paused != 0 {
+            return Err(VaultError::PoolPaused.into());
+        }
         if etf.total_supply == 0 {
             return Err(VaultError::DivisionByZero.into());
         }
-        (etf.token_count as usize, etf.total_supply, etf.authority, etf.bump, etf.fee_bps)
+        (
+            etf.token_count as usize,
+            etf.total_supply,
+            etf.authority,
+            etf.bump,
+            etf.fee_bps,
+            etf.treasury,
+        )
     };
+
+    // Validate treasury_etf_ata matches etf.treasury (same check as Deposit).
+    if treasury_etf_ata.owner() != &TOKEN_PROGRAM_ID {
+        return Err(VaultError::TreasuryMismatch.into());
+    }
+    {
+        let data = treasury_etf_ata.try_borrow_data()?;
+        if data.len() < 64 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if &data[32..64] != &treasury {
+            return Err(VaultError::TreasuryMismatch.into());
+        }
+    }
+
+    if accounts.len() < 6 + tc * 2 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
 
     if burn_amount > total_supply {
         return Err(VaultError::InsufficientBalance.into());
@@ -72,12 +114,24 @@ pub fn process_withdraw(
         .checked_sub(fee_amount)
         .ok_or(VaultError::Overflow)?;
 
-    // Burn ETF tokens from withdrawer
+    // Transfer fee portion to treasury (withdrawer signs). Treasury accrues
+    // real ETF tokens instead of the fee being silently destroyed.
+    if fee_amount > 0 {
+        Transfer {
+            from: withdrawer_etf_ata,
+            to: treasury_etf_ata,
+            authority: withdrawer,
+            amount: fee_amount,
+        }
+        .invoke()?;
+    }
+
+    // Burn only the effective (post-fee) portion from withdrawer.
     Burn {
         account: withdrawer_etf_ata,
         mint: etf_mint_ai,
         authority: withdrawer,
-        amount: burn_amount,
+        amount: effective_burn,
     }
     .invoke()?;
 
@@ -93,8 +147,8 @@ pub fn process_withdraw(
     let mut total_withdrawn: u64 = 0;
 
     for i in 0..tc {
-        let vault = &accounts[5 + i];
-        let dest = &accounts[5 + tc + i];
+        let vault = &accounts[6 + i];
+        let dest = &accounts[6 + tc + i];
 
         // Read vault balance at offset 64 (SPL token account amount)
         let vault_balance = {
@@ -134,13 +188,14 @@ pub fn process_withdraw(
         return Err(VaultError::SlippageExceeded.into());
     }
 
-    // Update total supply (checked_sub prevents underflow to u64::MAX)
+    // Update total supply: only the burned portion leaves circulation.
+    // Fee tokens were transferred (not burned), so they still count in supply.
     {
         let mut data = etf_state_ai.try_borrow_mut_data()?;
         let etf = unsafe { load_mut::<EtfState>(&mut data) }
             .ok_or(ProgramError::InvalidAccountData)?;
         etf.total_supply = etf.total_supply
-            .checked_sub(burn_amount)
+            .checked_sub(effective_burn)
             .ok_or(VaultError::Overflow)?;
     }
 
