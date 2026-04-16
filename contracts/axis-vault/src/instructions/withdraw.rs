@@ -80,6 +80,9 @@ pub fn process_withdraw(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
+    // Account layout note: Withdraw puts vaults in [5..5+tc] and user ATAs in
+    // [5+tc..5+2*tc] — the reverse of Deposit, because funds flow vault → user
+    // here. Keep the two in sync.
     for i in 0..tc {
         let vault = &accounts[5 + i];
         if vault.key() != &token_vaults[i] {

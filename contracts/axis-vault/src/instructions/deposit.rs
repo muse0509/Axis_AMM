@@ -84,7 +84,9 @@ pub fn process_deposit(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    // Validate each vault against stored state (positions 5+tc..5+2*tc)
+    // Account layout note: Deposit puts user ATAs in [5..5+tc] and vaults in
+    // [5+tc..5+2*tc]. Withdraw flips this (vaults first, user ATAs second)
+    // because funds flow the opposite direction. Keep the two in sync.
     for i in 0..tc {
         let vault = &accounts[5 + tc + i];
         if vault.key() != &token_vaults[i] {

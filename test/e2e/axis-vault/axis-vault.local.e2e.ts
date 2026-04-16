@@ -477,7 +477,88 @@ async function main() {
     console.log("  Correctly routed through proportional path");
   }
 
-  // 15. Test: Full withdrawal (burn_amount == total_supply) → total_supply goes to 0
+  // 15. Test: Withdraw with wrong etf_mint → MintMismatch (9009 / 0x2331)
+  // Mirrors Test 11 on the Withdraw side. Must run while total_supply > 0,
+  // otherwise the DivisionByZero check in withdraw.rs fires first.
+  console.log("\n> Test: Withdraw with wrong etf_mint (expect MintMismatch)");
+  try {
+    const fakeMint = await createMint(conn, payer, payer.publicKey, null, 6);
+    const badWithdrawData = Buffer.concat([
+      Buffer.from([2]),
+      u64Le(1_000n),
+      Buffer.from([nameBytes.length]),
+      nameBytes,
+    ]);
+    await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: etfState, isSigner: false, isWritable: true },
+        { pubkey: fakeMint, isSigner: false, isWritable: true }, // WRONG mint
+        { pubkey: userEtfAta, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
+        ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
+      ],
+      data: badWithdrawData,
+    })), [payer]);
+    throw new Error("Should have failed but succeeded");
+  } catch (err: any) {
+    const msg = err.message || String(err);
+    // MintMismatch = 9009 = 0x2331
+    if (msg.includes("0x2331") || msg.includes("9009")) {
+      console.log("  Correctly rejected with MintMismatch:", msg.match(/0x[0-9a-f]+/i)?.[0] ?? "9009");
+    } else if (msg === "Should have failed but succeeded") {
+      throw new Error("Withdraw with wrong etf_mint should have failed");
+    } else {
+      console.log("  Rejected with error (unexpected code):", msg.slice(0, 120));
+    }
+  }
+
+  // 16. Test: Withdraw with wrong vault → VaultMismatch (9013 / 0x2335)
+  // Mirrors Test 12 on the Withdraw side. Withdraw's account layout puts
+  // vaults in [5..5+N] (opposite of Deposit), so swap the first vault here.
+  console.log("\n> Test: Withdraw with wrong vault account (expect VaultMismatch)");
+  try {
+    const fakeVault = await createAccount(conn, payer, mints[0], payer.publicKey);
+    const wrongVaults = [fakeVault, vaults[1], vaults[2]];
+    const badWithdrawData = Buffer.concat([
+      Buffer.from([2]),
+      u64Le(1_000n),
+      Buffer.from([nameBytes.length]),
+      nameBytes,
+    ]);
+    await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: etfState, isSigner: false, isWritable: true },
+        { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
+        { pubkey: userEtfAta, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        ...wrongVaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
+        ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
+      ],
+      data: badWithdrawData,
+    })), [payer]);
+    throw new Error("Should have failed but succeeded");
+  } catch (err: any) {
+    const msg = err.message || String(err);
+    // VaultMismatch = 9013 = 0x2335
+    if (msg.includes("0x2335") || msg.includes("9013")) {
+      console.log("  Correctly rejected with VaultMismatch:", msg.match(/0x[0-9a-f]+/i)?.[0] ?? "9013");
+    } else if (msg === "Should have failed but succeeded") {
+      throw new Error("Withdraw with wrong vault should have failed");
+    } else {
+      console.log("  Rejected with error (unexpected code):", msg.slice(0, 120));
+    }
+  }
+
+  // TODO(#33 follow-up): Once axis-vault exposes a SetPaused instruction,
+  // add paused-pool tests for both Deposit and Withdraw. Expected behavior:
+  // etf.paused != 0 → PoolPaused (9012 / 0x2334) on both code paths.
+
+  // 17. Test: Full withdrawal (burn_amount == total_supply) → total_supply goes to 0
   console.log("\n> Test: Full withdrawal drains total_supply to zero");
   {
     const remaining = (await getAccount(conn, userEtfAta)).amount;
@@ -508,7 +589,7 @@ async function main() {
     console.log(`  Burned ${remaining}, total_supply now 0`);
   }
 
-  // 16. Test: CreateEtf with token_count < 2 → InvalidBasketSize (9002 / 0x232A)
+  // 18. Test: CreateEtf with token_count < 2 → InvalidBasketSize (9002 / 0x232A)
   console.log("\n> Test: CreateEtf with token_count=1 (expect InvalidBasketSize)");
   try {
     const badName = Buffer.from("BADSIZE1");
@@ -559,7 +640,7 @@ async function main() {
     }
   }
 
-  // 17. Test: CreateEtf with weights summing ≠ 10_000 → WeightsMismatch (9003 / 0x232B)
+  // 19. Test: CreateEtf with weights summing ≠ 10_000 → WeightsMismatch (9003 / 0x232B)
   console.log("\n> Test: CreateEtf with weights summing to 9999 (expect WeightsMismatch)");
   try {
     const badName = Buffer.from("BADWT01");
@@ -619,7 +700,7 @@ async function main() {
     }
   }
 
-  // 18. Test: CreateEtf duplicate-init (same PDA twice) → AlreadyInitialized or system-level failure
+  // 20. Test: CreateEtf duplicate-init (same PDA twice) → AlreadyInitialized or system-level failure
   // The original ETF PDA (etfState) is already initialized from Step 5. Attempt another CreateEtf
   // targeting the same PDA — must not succeed.
   console.log("\n> Test: CreateEtf duplicate-init on existing PDA (expect error)");
