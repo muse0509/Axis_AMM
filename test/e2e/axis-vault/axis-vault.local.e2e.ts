@@ -414,9 +414,12 @@ async function main() {
   // 12. Test: Deposit with wrong vault → VaultMismatch (9013 / 0x2335)
   console.log("\n> Test: Deposit with wrong vault account (expect VaultMismatch)");
   try {
-    // Create a vault-like token account owned by payer (not the EtfState PDA) for mint[0]
-    const fakeVault = await createAccount(conn, payer, mints[0], payer.publicKey);
-    const wrongVaults = [fakeVault, vaults[1], vaults[2]];
+    // Use vaults[1] at slot 0 — valid token account, owned by the real
+    // EtfState PDA, so SPL token pre-checks pass and my VaultMismatch
+    // guard (which checks slot key against stored token_vaults[0]) fires
+    // first. Using a payer-owned fake vault here causes SPL Token to
+    // reject with "Provided owner is not allowed" before my check runs.
+    const wrongVaults = [vaults[1], vaults[1], vaults[2]];
     const badDepositData = Buffer.concat([
       Buffer.from([1]),
       u64Le(100_000_000n),
@@ -574,8 +577,10 @@ async function main() {
   // vaults in [5..5+N] (opposite of Deposit), so swap the first vault here.
   console.log("\n> Test: Withdraw with wrong vault account (expect VaultMismatch)");
   try {
-    const fakeVault = await createAccount(conn, payer, mints[0], payer.publicKey);
-    const wrongVaults = [fakeVault, vaults[1], vaults[2]];
+    // Same rationale as the Deposit wrong-vault test: swap to vaults[1]
+    // at slot 0 so SPL Token accepts the account and my VaultMismatch
+    // guard is what fires.
+    const wrongVaults = [vaults[1], vaults[1], vaults[2]];
     const badWithdrawData = Buffer.concat([
       Buffer.from([2]),
       u64Le(1_000n),
