@@ -186,18 +186,16 @@ fn clear_batch_inner(
     // --- Read oracle prices (if 3 oracle feeds provided: accounts 6, 7, 8) ---
     let oracle_prices: Option<[u64; 3]> = if accounts.len() > 8 {
         let mut prices = [0u64; 3];
-        let mut all_ok = true;
         for i in 0..3 {
             let feed = &accounts[6 + i];
             match crate::oracle::read_switchboard_price(feed, current_slot, 100, 1) {
                 Ok(p) => prices[i] = p,
                 Err(_) => {
-                    all_ok = false;
-                    break;
+                    return Err(Pfda3Error::OracleStale.into());
                 }
             }
         }
-        if all_ok { Some(prices) } else { None }
+        Some(prices)
     } else {
         None
     };

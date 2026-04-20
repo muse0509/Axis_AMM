@@ -93,7 +93,13 @@ async function main() {
   }
   await sendAndConfirmTransaction(conn, createVaultsTx, [payer, ...vaultKps]);
 
-  // 5. CreateEtf
+  // 5. Create treasury keypair (separate from depositor to avoid ATA collision)
+  const treasuryKp = Keypair.generate();
+  await sendAndConfirmTransaction(conn, new Transaction().add(
+    SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: treasuryKp.publicKey, lamports: LAMPORTS_PER_SOL / 10 })
+  ), [payer]);
+
+  // 6. CreateEtf
   console.log("\n> CreateEtf");
   const weightsBuf = Buffer.alloc(TOKEN_COUNT * 2);
   for (let i = 0; i < TOKEN_COUNT; i++) weightsBuf.writeUInt16LE(WEIGHTS[i], i * 2);
@@ -112,7 +118,7 @@ async function main() {
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: etfState, isSigner: false, isWritable: true },
       { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
-      { pubkey: payer.publicKey, isSigner: false, isWritable: false }, // treasury
+      { pubkey: treasuryKp.publicKey, isSigner: false, isWritable: false }, // treasury
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       // basket mints
@@ -129,14 +135,16 @@ async function main() {
   const totalSupply = etfInfo!.data.readBigUInt64LE(408);
   console.log("  Total supply:", totalSupply.toString());
 
-  // 6. Create user's ETF token account
+  // 7. Create user's ETF token account + treasury ETF token account
   const userEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, payer.publicKey);
+  const treasuryEtfAta = await createAccount(conn, payer, etfMintKp.publicKey, treasuryKp.publicKey);
 
   // 7. Deposit — deposit 1000 tokens (base amount, scaled by weights)
   console.log("\n> Deposit (1000 base amount)");
   const depositData = Buffer.concat([
     Buffer.from([1]),                     // disc = Deposit
     u64Le(1_000_000_000n),               // amount (1000 tokens with 6 decimals)
+    u64Le(0n),                           // min_mint_out (0 = no slippage check)
     Buffer.from([nameBytes.length]),
     nameBytes,
   ]);
@@ -149,6 +157,7 @@ async function main() {
       { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
       { pubkey: userEtfAta, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: treasuryEtfAta, isSigner: false, isWritable: true }, // treasury ETF ATA
       // user basket token accounts (source)
       ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       // vault accounts (destination)
@@ -168,12 +177,30 @@ async function main() {
     console.log(`  Vault ${i} balance: ${vaultBal.toLocaleString()}`);
   }
 
+  // Fee assertion: first deposit is 1_000_000_000 base; fee_bps=30 (0.3%)
+  // so treasury should hold 3_000_000 ETF tokens and user ETF balance
+  // should be exactly 997_000_000 (net of fee). Asserting both proves the
+  // fee actually moved to treasury rather than being silently destroyed.
+  {
+    const treasuryBal = (await getAccount(conn, treasuryEtfAta)).amount;
+    const expectedFee = 3_000_000n;
+    const expectedNet = 997_000_000n;
+    if (treasuryBal !== expectedFee) {
+      throw new Error(`Deposit fee mismatch: treasury=${treasuryBal}, expected=${expectedFee}`);
+    }
+    if (etfBalance !== expectedNet) {
+      throw new Error(`Net mint mismatch: user=${etfBalance}, expected=${expectedNet}`);
+    }
+    console.log(`  Treasury fee received: ${treasuryBal} (30 bps of 1_000_000_000)`);
+  }
+
   // 8. Withdraw — burn half the ETF tokens
   const burnAmount = etfBalance / 2n;
   console.log(`\n> Withdraw (burn ${burnAmount} ETF tokens)`);
   const withdrawData = Buffer.concat([
     Buffer.from([2]),                     // disc = Withdraw
     u64Le(burnAmount),
+    u64Le(0n),                           // min_tokens_out (0 = no slippage check)
     Buffer.from([nameBytes.length]),
     nameBytes,
   ]);
@@ -191,6 +218,7 @@ async function main() {
       { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
       { pubkey: userEtfAta, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: treasuryEtfAta, isSigner: false, isWritable: true }, // treasury ETF ATA (fee recipient)
       // vault accounts (source)
       ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
       // user basket token accounts (destination)
@@ -207,6 +235,20 @@ async function main() {
     const after = (await getAccount(conn, userTokens[i])).amount;
     const received = after - beforeBalances[i];
     console.log(`  Token ${i} received back: ${received.toLocaleString()}`);
+  }
+
+  // Withdraw fee assertion: burn_amount was etfBalance/2 = 498_500_000;
+  // fee_bps=30 → fee = 1_495_500. Treasury already had 3_000_000 from the
+  // Deposit fee, so its balance should now be 3_000_000 + 1_495_500 =
+  // 4_495_500. Asserting the delta proves the withdraw fee transfer
+  // actually hit the treasury (and wasn't silently burned).
+  {
+    const treasuryBalAfter = (await getAccount(conn, treasuryEtfAta)).amount;
+    const expected = 4_495_500n;
+    if (treasuryBalAfter !== expected) {
+      throw new Error(`Withdraw fee mismatch: treasury=${treasuryBalAfter}, expected=${expected}`);
+    }
+    console.log(`  Treasury total after withdraw fee: ${treasuryBalAfter}`);
   }
 
   // 9. Test: CreateEtf with duplicate mints → DuplicateMint error (9011 / 0x2333)
@@ -298,6 +340,7 @@ async function main() {
     const badWithdrawData = Buffer.concat([
       Buffer.from([2]),
       u64Le(hugeAmount),
+      u64Le(0n),
       Buffer.from([nameBytes.length]),
       nameBytes,
     ]);
@@ -310,6 +353,7 @@ async function main() {
         { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       ],
@@ -336,6 +380,7 @@ async function main() {
     const badDepositData = Buffer.concat([
       Buffer.from([1]),
       u64Le(100_000_000n),
+      u64Le(0n),
       Buffer.from([nameBytes.length]),
       nameBytes,
     ]);
@@ -347,6 +392,7 @@ async function main() {
         { pubkey: fakeMint, isSigner: false, isWritable: true }, // WRONG mint
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
         ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
       ],
@@ -368,12 +414,16 @@ async function main() {
   // 12. Test: Deposit with wrong vault → VaultMismatch (9013 / 0x2335)
   console.log("\n> Test: Deposit with wrong vault account (expect VaultMismatch)");
   try {
-    // Create a vault-like token account owned by payer (not the EtfState PDA) for mint[0]
-    const fakeVault = await createAccount(conn, payer, mints[0], payer.publicKey);
-    const wrongVaults = [fakeVault, vaults[1], vaults[2]];
+    // Use vaults[1] at slot 0 — valid token account, owned by the real
+    // EtfState PDA, so SPL token pre-checks pass and my VaultMismatch
+    // guard (which checks slot key against stored token_vaults[0]) fires
+    // first. Using a payer-owned fake vault here causes SPL Token to
+    // reject with "Provided owner is not allowed" before my check runs.
+    const wrongVaults = [vaults[1], vaults[1], vaults[2]];
     const badDepositData = Buffer.concat([
       Buffer.from([1]),
       u64Le(100_000_000n),
+      u64Le(0n),
       Buffer.from([nameBytes.length]),
       nameBytes,
     ]);
@@ -385,6 +435,7 @@ async function main() {
         { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
         ...wrongVaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
       ],
@@ -411,6 +462,7 @@ async function main() {
     const badWithdrawData = Buffer.concat([
       Buffer.from([2]),
       u64Le(1_000n),
+      u64Le(0n),
       Buffer.from([nameBytes.length]),
       nameBytes,
     ]);
@@ -422,6 +474,7 @@ async function main() {
         { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       ],
@@ -451,6 +504,7 @@ async function main() {
     const secondDepositData = Buffer.concat([
       Buffer.from([1]),
       u64Le(500_000_000n),  // 500 tokens base
+      u64Le(0n),
       Buffer.from([nameBytes.length]),
       nameBytes,
     ]);
@@ -462,6 +516,7 @@ async function main() {
         { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
         ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
       ],
@@ -486,6 +541,7 @@ async function main() {
     const badWithdrawData = Buffer.concat([
       Buffer.from([2]),
       u64Le(1_000n),
+      u64Le(0n),
       Buffer.from([nameBytes.length]),
       nameBytes,
     ]);
@@ -497,6 +553,7 @@ async function main() {
         { pubkey: fakeMint, isSigner: false, isWritable: true }, // WRONG mint
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       ],
@@ -520,11 +577,14 @@ async function main() {
   // vaults in [5..5+N] (opposite of Deposit), so swap the first vault here.
   console.log("\n> Test: Withdraw with wrong vault account (expect VaultMismatch)");
   try {
-    const fakeVault = await createAccount(conn, payer, mints[0], payer.publicKey);
-    const wrongVaults = [fakeVault, vaults[1], vaults[2]];
+    // Same rationale as the Deposit wrong-vault test: swap to vaults[1]
+    // at slot 0 so SPL Token accepts the account and my VaultMismatch
+    // guard is what fires.
+    const wrongVaults = [vaults[1], vaults[1], vaults[2]];
     const badWithdrawData = Buffer.concat([
       Buffer.from([2]),
       u64Le(1_000n),
+      u64Le(0n),
       Buffer.from([nameBytes.length]),
       nameBytes,
     ]);
@@ -536,6 +596,7 @@ async function main() {
         { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...wrongVaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       ],
@@ -558,13 +619,16 @@ async function main() {
   // add paused-pool tests for both Deposit and Withdraw. Expected behavior:
   // etf.paused != 0 → PoolPaused (9012 / 0x2334) on both code paths.
 
-  // 17. Test: Full withdrawal (burn_amount == total_supply) → total_supply goes to 0
-  console.log("\n> Test: Full withdrawal drains total_supply to zero");
-  {
-    const remaining = (await getAccount(conn, userEtfAta)).amount;
-    const fullWithdrawData = Buffer.concat([
-      Buffer.from([2]),
-      u64Le(remaining),
+  // 16a. Test: Deposit with min_mint_out too high → SlippageExceeded (9015 / 0x2337)
+  // Exercises the Deposit slippage guard. The expected mint is bounded by
+  // the vault's proportional math; we set min_mint_out above any possible
+  // result to force rejection without relying on price movement.
+  console.log("\n> Test: Deposit with min_mint_out too high (expect SlippageExceeded)");
+  try {
+    const slipData = Buffer.concat([
+      Buffer.from([1]),
+      u64Le(100_000_000n),
+      u64Le(999_999_999_999_999n), // unreachable min_mint_out
       Buffer.from([nameBytes.length]),
       nameBytes,
     ]);
@@ -576,17 +640,146 @@ async function main() {
         { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
         { pubkey: userEtfAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
+        ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
+        ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
+      ],
+      data: slipData,
+    })), [payer]);
+    throw new Error("Should have failed but succeeded");
+  } catch (err: any) {
+    const msg = err.message || String(err);
+    if (msg.includes("0x2337") || msg.includes("9015")) {
+      console.log("  Correctly rejected with SlippageExceeded:", msg.match(/0x[0-9a-f]+/i)?.[0] ?? "9015");
+    } else if (msg === "Should have failed but succeeded") {
+      throw new Error("Deposit with unreachable min_mint_out should have failed");
+    } else {
+      console.log("  Rejected with error (unexpected code):", msg.slice(0, 120));
+    }
+  }
+
+  // 16b. Test: Withdraw with min_tokens_out too high → SlippageExceeded (9015 / 0x2337)
+  console.log("\n> Test: Withdraw with min_tokens_out too high (expect SlippageExceeded)");
+  try {
+    const slipData = Buffer.concat([
+      Buffer.from([2]),
+      u64Le(1_000n),                   // tiny burn → tiny total output
+      u64Le(999_999_999_999_999n),     // unreachable min_tokens_out
+      Buffer.from([nameBytes.length]),
+      nameBytes,
+    ]);
+    await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: etfState, isSigner: false, isWritable: true },
+        { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
+        { pubkey: userEtfAta, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
+        ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
+        ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
+      ],
+      data: slipData,
+    })), [payer]);
+    throw new Error("Should have failed but succeeded");
+  } catch (err: any) {
+    const msg = err.message || String(err);
+    if (msg.includes("0x2337") || msg.includes("9015")) {
+      console.log("  Correctly rejected with SlippageExceeded:", msg.match(/0x[0-9a-f]+/i)?.[0] ?? "9015");
+    } else if (msg === "Should have failed but succeeded") {
+      throw new Error("Withdraw with unreachable min_tokens_out should have failed");
+    } else {
+      console.log("  Rejected with error (unexpected code):", msg.slice(0, 120));
+    }
+  }
+
+  // 16c. Test: Deposit with skewed vault balances → NavDeviationExceeded (9016 / 0x2338)
+  // The Deposit NAV check bounds the spread between per-vault mint candidates.
+  // We deliberately inflate vault[0]'s balance (by minting extra basket tokens
+  // directly into it, bypassing the Deposit path) so the vault ratios no
+  // longer match target weights; a subsequent Deposit must fail.
+  console.log("\n> Test: Deposit with skewed vault balances (expect NavDeviationExceeded)");
+  {
+    // Inflate vault[0] by ~50 % so candidate[0] is materially lower than
+    // candidate[1..]. Any spread > 3 % (MAX_NAV_DEVIATION_BPS=300) trips.
+    const vault0BalBefore = (await getAccount(conn, vaults[0])).amount;
+    const skewAmount = vault0BalBefore / 2n;
+    await mintTo(conn, payer, mints[0], vaults[0], payer, skewAmount);
+    try {
+      const navData = Buffer.concat([
+        Buffer.from([1]),
+        u64Le(100_000_000n),
+        u64Le(0n),
+        Buffer.from([nameBytes.length]),
+        nameBytes,
+      ]);
+      await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+        programId: PROGRAM_ID,
+        keys: [
+          { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+          { pubkey: etfState, isSigner: false, isWritable: true },
+          { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
+          { pubkey: userEtfAta, isSigner: false, isWritable: true },
+          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
+          ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
+          ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
+        ],
+        data: navData,
+      })), [payer]);
+      throw new Error("Should have failed but succeeded");
+    } catch (err: any) {
+      const msg = err.message || String(err);
+      if (msg.includes("0x2338") || msg.includes("9016")) {
+        console.log("  Correctly rejected with NavDeviationExceeded:", msg.match(/0x[0-9a-f]+/i)?.[0] ?? "9016");
+      } else if (msg === "Should have failed but succeeded") {
+        throw new Error("Deposit with skewed vault should have failed NavDeviation");
+      } else {
+        console.log("  Rejected with error (unexpected code):", msg.slice(0, 120));
+      }
+    }
+  }
+
+  // 17. Test: Full user-balance withdrawal → user goes to 0, total_supply
+  // shrinks by effective_burn (post-fee). With the fee mechanism the fee
+  // portion transfers to treasury rather than burning, so total_supply
+  // retains exactly the treasury's ETF balance. The invariant asserted
+  // here is the post-withdraw one: total_supply == treasury_etf_balance.
+  console.log("\n> Test: Full withdrawal; total_supply should equal treasury balance");
+  {
+    const remaining = (await getAccount(conn, userEtfAta)).amount;
+    const fullWithdrawData = Buffer.concat([
+      Buffer.from([2]),
+      u64Le(remaining),
+      u64Le(0n),
+      Buffer.from([nameBytes.length]),
+      nameBytes,
+    ]);
+    await sendAndConfirmTransaction(conn, new Transaction().add(new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: etfState, isSigner: false, isWritable: true },
+        { pubkey: etfMintKp.publicKey, isSigner: false, isWritable: true },
+        { pubkey: userEtfAta, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: treasuryEtfAta, isSigner: false, isWritable: true },
         ...vaults.map(v => ({ pubkey: v, isSigner: false, isWritable: true })),
         ...userTokens.map(u => ({ pubkey: u, isSigner: false, isWritable: true })),
       ],
       data: fullWithdrawData,
     })), [payer]);
     const etfEnd = (await getAccount(conn, userEtfAta)).amount;
+    const treasuryEnd = (await getAccount(conn, treasuryEtfAta)).amount;
     const totalSupplyEnd = (await conn.getAccountInfo(etfState))!.data.readBigUInt64LE(408);
-    if (etfEnd !== 0n || totalSupplyEnd !== 0n) {
-      throw new Error(`Full withdrawal didn't zero out balances (etf=${etfEnd}, supply=${totalSupplyEnd})`);
+    if (etfEnd !== 0n) {
+      throw new Error(`Full withdrawal left user ETF balance > 0: ${etfEnd}`);
     }
-    console.log(`  Burned ${remaining}, total_supply now 0`);
+    if (totalSupplyEnd !== treasuryEnd) {
+      throw new Error(`Supply/treasury mismatch after full withdraw: supply=${totalSupplyEnd}, treasury=${treasuryEnd}`);
+    }
+    console.log(`  Burned ${remaining}; user=0, total_supply=${totalSupplyEnd} (== treasury)`);
   }
 
   // 18. Test: CreateEtf with token_count < 2 → InvalidBasketSize (9002 / 0x232A)

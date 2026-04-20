@@ -7,6 +7,7 @@ use pinocchio::{
 };
 use pinocchio_token::instructions::{MintTo, Transfer};
 
+use crate::constants::{MAX_NAV_DEVIATION_BPS, TOKEN_PROGRAM_ID};
 use crate::error::VaultError;
 use crate::state::{load, load_mut, EtfState};
 
@@ -24,14 +25,16 @@ use crate::state::{load, load_mut, EtfState};
 ///   2: [writable]  etf_mint
 ///   3: [writable]  depositor_etf_token_account (receives minted ETF tokens)
 ///   4: []          token_program
-///   5..5+N: [writable] depositor's basket token accounts (source)
-///   5+N..5+2N: [writable] vault token accounts (destination)
+///   5: [writable]  treasury_etf_ata (receives fee ETF tokens)
+///   6..6+N: [writable] depositor's basket token accounts (source)
+///   6+N..6+2N: [writable] vault token accounts (destination)
 ///
-/// Data: [amount: u64] — base amount per token (scaled by weight)
+/// Data: [amount: u64][min_mint_out: u64] — base amount per token (scaled by weight)
 pub fn process_deposit(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     amount: u64,
+    min_mint_out: u64,
     name: &[u8],
 ) -> ProgramResult {
     if amount == 0 {
@@ -43,6 +46,7 @@ pub fn process_deposit(
     let etf_mint_ai = &accounts[2];
     let depositor_etf_ata = &accounts[3];
     let _tok = &accounts[4];
+    let treasury_etf_ata = &accounts[5];
 
     if !depositor.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
@@ -54,7 +58,7 @@ pub fn process_deposit(
     }
 
     // Load ETF state
-    let (tc, total_supply, authority, weights, bump_seed, etf_mint, token_vaults) = {
+    let (tc, total_supply, authority, weights, bump_seed, fee_bps, treasury, etf_mint, token_vaults) = {
         let data = etf_state_ai.try_borrow_data()?;
         let etf = unsafe { load::<EtfState>(&data) }
             .ok_or(ProgramError::InvalidAccountData)?;
@@ -70,6 +74,8 @@ pub fn process_deposit(
             etf.authority,
             etf.weights_bps,
             etf.bump,
+            etf.fee_bps,
+            etf.treasury,
             etf.etf_mint,
             etf.token_vaults,
         )
@@ -80,15 +86,31 @@ pub fn process_deposit(
         return Err(VaultError::MintMismatch.into());
     }
 
-    if accounts.len() < 5 + tc * 2 {
+    // Validate treasury_etf_ata: must be a Token Program account whose
+    // stored owner matches etf.treasury. Without this, anyone could route
+    // the protocol fee to an attacker-controlled ATA.
+    if treasury_etf_ata.owner() != &TOKEN_PROGRAM_ID {
+        return Err(VaultError::TreasuryMismatch.into());
+    }
+    {
+        let data = treasury_etf_ata.try_borrow_data()?;
+        if data.len() < 64 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if &data[32..64] != &treasury {
+            return Err(VaultError::TreasuryMismatch.into());
+        }
+    }
+
+    if accounts.len() < 6 + tc * 2 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    // Account layout note: Deposit puts user ATAs in [5..5+tc] and vaults in
-    // [5+tc..5+2*tc]. Withdraw flips this (vaults first, user ATAs second)
-    // because funds flow the opposite direction. Keep the two in sync.
+    // Account layout note: Deposit puts user ATAs in [6..6+tc] and vaults in
+    // [6+tc..6+2*tc] (treasury_etf_ata occupies slot 5). Withdraw flips user/
+    // vault ordering because funds flow the opposite direction. Keep in sync.
     for i in 0..tc {
-        let vault = &accounts[5 + tc + i];
+        let vault = &accounts[6 + tc + i];
         if vault.key() != &token_vaults[i] {
             return Err(VaultError::VaultMismatch.into());
         }
@@ -106,9 +128,18 @@ pub fn process_deposit(
     let mint_amount = if total_supply == 0 {
         amount
     } else {
+        // Per-vault mint candidates. Under a healthy basket these match
+        // (the deposit mirrors target weights, vault balances match target
+        // weights). If the vault has drifted — e.g. post-rebalance or a
+        // MEV sandwich between the quote and the tx — the candidates
+        // diverge and the safe mint is the minimum. We additionally bound
+        // the spread: if the widest candidate exceeds the narrowest by
+        // more than MAX_NAV_DEVIATION_BPS, the implied per-token NAV has
+        // drifted too far and we refuse to mint at a stale composition.
         let mut min_mint: Option<u128> = None;
+        let mut max_mint: Option<u128> = None;
         for i in 0..tc {
-            let vault = &accounts[5 + tc + i];
+            let vault = &accounts[6 + tc + i];
             let data = vault.try_borrow_data()?;
             if data.len() < 72 {
                 return Err(ProgramError::InvalidAccountData);
@@ -133,19 +164,50 @@ pub fn process_deposit(
                 Some(current) => current.min(candidate),
                 None => candidate,
             });
+            max_mint = Some(match max_mint {
+                Some(current) => current.max(candidate),
+                None => candidate,
+            });
         }
 
-        let candidate = min_mint.ok_or(VaultError::DivisionByZero)?;
-        if candidate == 0 {
+        let lo = min_mint.ok_or(VaultError::DivisionByZero)?;
+        let hi = max_mint.ok_or(VaultError::DivisionByZero)?;
+        if lo == 0 {
             return Err(VaultError::ZeroDeposit.into());
         }
-        candidate as u64
+        // NAV deviation: (hi - lo) / lo > MAX_NAV_DEVIATION_BPS / 10_000
+        // Rearranged as (hi - lo) * 10_000 > lo * MAX to stay in u128.
+        let spread = hi.checked_sub(lo).ok_or(VaultError::Overflow)?;
+        if spread
+            .checked_mul(10_000)
+            .ok_or(VaultError::Overflow)?
+            > lo
+                .checked_mul(MAX_NAV_DEVIATION_BPS as u128)
+                .ok_or(VaultError::Overflow)?
+        {
+            return Err(VaultError::NavDeviationExceeded.into());
+        }
+        lo as u64
     };
+
+    // Slippage check (fires before any transfer — cheap failure on stale quotes)
+    if mint_amount < min_mint_out {
+        return Err(VaultError::SlippageExceeded.into());
+    }
+
+    // Compute fee
+    let fee_amount = mint_amount
+        .checked_mul(fee_bps as u64)
+        .ok_or(VaultError::Overflow)?
+        / 10_000;
+    let net_mint = mint_amount
+        .checked_sub(fee_amount)
+        .ok_or(VaultError::Overflow)?;
 
     // Transfer basket tokens from depositor to vaults
     for i in 0..tc {
-        let source = &accounts[5 + i];
-        let vault = &accounts[5 + tc + i];
+        let source = &accounts[6 + i];
+        let vault = &accounts[6 + tc + i];
         let token_amount = token_amounts[i];
 
         if token_amount > 0 {
@@ -172,11 +234,22 @@ pub fn process_deposit(
         mint: etf_mint_ai,
         account: depositor_etf_ata,
         mint_authority: etf_state_ai,
-        amount: mint_amount,
+        amount: net_mint,
     }
     .invoke_signed(&[Signer::from(&mint_signer_seeds)])?;
 
-    // Update total supply
+    // Mint fee to treasury
+    if fee_amount > 0 {
+        MintTo {
+            mint: etf_mint_ai,
+            account: treasury_etf_ata,
+            mint_authority: etf_state_ai,
+            amount: fee_amount,
+        }
+        .invoke_signed(&[Signer::from(&mint_signer_seeds)])?;
+    }
+
+    // Update total supply (full mint_amount including fee)
     {
         let mut data = etf_state_ai.try_borrow_mut_data()?;
         let etf = unsafe { load_mut::<EtfState>(&mut data) }

@@ -330,27 +330,26 @@ async function main() {
   console.log(`  Token 1 received: ${(afterBal - beforeBal).toLocaleString()}`);
 
   // ═══════════════════════════════════════════════════════════════════
-  // Step 10: Oracle Validation — Owner + Discriminator (Issues #7, #14)
+  // Step 10: Oracle Validation — Hard Fail on Invalid Feeds (Issue #18)
   //
   // After the normal batch 0 cycle, the pool is now on batch_id=1.
   // We submit a new swap into batch 1, wait for its window to end,
   // then attempt ClearBatch with 3 fake oracle accounts (random keypairs).
   //
-  // The oracle reader (oracle.rs) applies TWO checks for each feed account:
-  //   1. verify_switchboard_owner() — account owned by Switchboard V3 program
-  //   2. discriminator check — first 8 bytes match
-  //      sha256("account:PullFeedAccountData")[0..8] =
-  //      [0xc4, 0x1b, 0x6c, 0xc4, 0x0a, 0xd7, 0xdb, 0x28]
+  // Issue #18 removes the previous "silent oracle fallback" behavior:
+  // when oracle accounts are passed, ClearBatch must validate them and
+  // fail loudly on any error rather than degrading to reserve-only pricing.
+  // This prevents an attacker from forcing oracle-free clearing by
+  // supplying junk feed accounts.
   //
-  // Random keypairs fail BOTH (owned by SystemProgram, no discriminator).
-  // Either failure triggers graceful fallback: oracle_prices = None,
-  // reserve-only pricing, ClearBatch still succeeds.
+  // Random keypairs trigger one of:
+  //   OracleOwnerMismatch = 8028 (0x1F5C) — wrong account owner
+  //   OracleInvalid       = 8020 (0x1F54) — wrong discriminator
+  //   OracleStale         = 8022 (0x1F56) — no fresh price data
   //
-  // Error code references:
-  //   OracleOwnerMismatch = 8028 (0x1F5C)
-  //   OracleInvalid       = 8020 (0x1F54)  // discriminator failure
+  // Whichever fires, ClearBatch must reject the transaction.
   // ═══════════════════════════════════════════════════════════════════
-  console.log("\n▶ Step 10: Oracle Validation (Issues #7 + #14 — owner + discriminator)");
+  console.log("\n▶ Step 10: Oracle hard-fail on invalid feeds (Issue #18 — silent fallback removed)");
 
   // 10a. SwapRequest into batch 1
   const [ticket1] = findTicket(pool, payer.publicKey, 1n);
@@ -398,32 +397,45 @@ async function main() {
     data: Buffer.from([2]),  // disc=2, no bid
   });
 
-  // The ClearBatch should succeed — oracle owner / discriminator failures
-  // cause graceful fallback to reserve-only pricing (oracle_prices = None).
-  const clearOracleSig = await sendAndConfirmTransaction(conn,
-    new Transaction().add(clearWithFakeOraclesIx),
+  // ClearBatch must hard-fail — silent fallback to reserve pricing was removed
+  // by issue #18, so any oracle validation error aborts the transaction.
+  let oracleHardFailed = false;
+  try {
+    await sendAndConfirmTransaction(conn,
+      new Transaction().add(clearWithFakeOraclesIx),
+      [payer]
+    );
+    throw new Error("ClearBatch with fake oracles should have failed but succeeded");
+  } catch (err: any) {
+    const msg = err?.message ?? String(err);
+    // Accept any of the oracle validation errors — exact one depends on check order.
+    // OracleInvalid=0x1f54, OracleStale=0x1f56, OracleOwnerMismatch=0x1f5c
+    if (msg.includes("0x1f54") || msg.includes("0x1f56") || msg.includes("0x1f5c") ||
+        msg.includes("8020") || msg.includes("8022") || msg.includes("8028")) {
+      const code = msg.match(/0x1f5[46c]/i)?.[0] ?? "oracle-error";
+      console.log(`  Correctly rejected with oracle error (${code}) — silent fallback removed`);
+      oracleHardFailed = true;
+    } else if (msg.includes("should have failed")) {
+      throw err;
+    } else {
+      throw new Error(`Expected oracle validation error, got: ${msg.slice(0, 200)}`);
+    }
+  }
+
+  if (!oracleHardFailed) {
+    throw new Error("Oracle hard-fail assertion did not fire");
+  }
+
+  // Now do a clean ClearBatch (no oracle feeds) to drain batch 1 and advance
+  // the pool, so any subsequent step has a fresh batch to work with.
+  const clearBatch1Ix = ixClearBatch(payer.publicKey, pool, queue1, history1, queue2);
+  const clearBatch1Sig = await sendAndConfirmTransaction(conn,
+    new Transaction().add(clearBatch1Ix),
     [payer]
   );
-  cuLog["ClearBatch(fakeOracles)"] = await getCU(conn, clearOracleSig);
-  console.log(`  ClearBatch with fake oracles succeeded (graceful fallback): ${clearOracleSig.slice(0, 16)}...`);
-  console.log(`  CU: ${cuLog["ClearBatch(fakeOracles)"]?.toLocaleString()}`);
-
-  // Verify oracle_used=0 in return data (byte 56 of the 57-byte return buffer)
-  const clearTx = await conn.getTransaction(clearOracleSig, {
-    maxSupportedTransactionVersion: 0, commitment: "confirmed"
-  });
-  // Return data is in the transaction metadata if available
-  if ((clearTx?.meta as any)?.returnData?.data) {
-    const returnBuf = Buffer.from((clearTx!.meta as any).returnData.data[0], "base64");
-    const oracleUsed = returnBuf[56];
-    console.log(`  oracle_used flag in return_data: ${oracleUsed} (expected 0)`);
-    if (oracleUsed !== 0) {
-      throw new Error("Expected oracle_used=0 when fake oracle accounts are passed");
-    }
-  } else {
-    console.log("  (return_data not available in tx metadata — skipping oracle_used check)");
-  }
-  console.log("  PASSED: Owner + discriminator checks reject fake feeds, oracle_used=0");
+  cuLog["ClearBatch(noOracle)"] = await getCU(conn, clearBatch1Sig);
+  console.log(`  Clean ClearBatch (no oracles) succeeded: ${clearBatch1Sig.slice(0, 16)}...`);
+  console.log("  PASSED: Invalid oracle feeds are rejected; absent feeds still allowed");
 
   // ═══════════════════════════════════════════════════════════════════
   // Step 11: BidExcessive Validation (Issue #8)
@@ -511,12 +523,12 @@ async function main() {
   }
 
   // 11d. Clean ClearBatch (no bid) to drain batch 2 for any future steps
-  const clearCleanSig = await sendAndConfirmTransaction(conn,
+  const clearBatch2Sig = await sendAndConfirmTransaction(conn,
     new Transaction().add(ixClearBatch(payer.publicKey, pool, queue2, history2, queue3)),
     [payer]
   );
-  cuLog["ClearBatch(clean)"] = await getCU(conn, clearCleanSig);
-  console.log(`  Clean ClearBatch (no bid) succeeded: ${clearCleanSig.slice(0, 16)}...`);
+  cuLog["ClearBatch(clean)"] = await getCU(conn, clearBatch2Sig);
+  console.log(`  Clean ClearBatch (no bid) succeeded: ${clearBatch2Sig.slice(0, 16)}...`);
   console.log("  PASSED: BidExcessive correctly rejects disproportionate bids");
 
   // ── Step 11: CloseBatchHistory — should fail (BatchWindowNotEnded) ──

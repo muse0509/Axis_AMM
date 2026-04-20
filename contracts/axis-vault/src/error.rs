@@ -18,6 +18,9 @@ pub enum VaultError {
     PoolPaused = 9012,
     VaultMismatch = 9013,
     InvalidProgramOwner = 9014,
+    SlippageExceeded = 9015,
+    NavDeviationExceeded = 9016,
+    TreasuryMismatch = 9017,
 }
 
 impl From<VaultError> for ProgramError {

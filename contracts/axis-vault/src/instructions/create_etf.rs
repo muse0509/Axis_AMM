@@ -159,9 +159,10 @@ pub fn process_create_etf(
         etf.weights_bps = wb;
         etf.total_supply = 0;
         etf.treasury = *treasury_ai.key();
+        etf.fee_bps = 30;
         etf.paused = 0;
         etf.bump = pda_bump;
-        etf._padding = [0; 6];
+        etf._padding = [0; 4];
     }
 
     Ok(())
